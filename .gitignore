@@ -1,0 +1,8 @@
+*.exe
+*.pdb
+*.res
+*.o
+*.obj
+*.bak
+
+tools/zig/

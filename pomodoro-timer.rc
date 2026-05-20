@@ -1,0 +1,77 @@
+#include <windows.h>
+
+// Dialog IDs
+#define IDD_SETTINGS 100
+#define IDD_ABOUT 101
+#define IDC_POMODORO 101
+#define IDC_SHORT_BREAK 102
+#define IDC_LONG_BREAK 103
+#define IDC_OK 104
+#define IDC_CANCEL 105
+#define IDC_CLOCK_SOUND 106
+#define IDC_AUTOSTART 107
+#define IDC_WEBSITE 108
+#define IDC_COFFEE 109
+#define IDD_INPUT 110
+#define IDC_INPUT_LABEL 110
+#define IDC_INPUT_EDIT 111
+#define IDC_LABEL_POMODORO 201
+#define IDC_LABEL_SHORT_BREAK 202
+#define IDC_LABEL_LONG_BREAK 203
+#define IDC_LABEL_CUSTOM 204
+#define IDC_CUSTOM_TIMER 205
+#define IDC_ABOUT_TITLE 210
+#define IDC_ABOUT_SUBTITLE 211
+#define IDC_ABOUT_AUTHOR 212
+
+// Sound resources
+CLOCK_WAV WAV "clock.wav"
+DING_WAV WAV "ding.wav"
+
+// Settings Dialog
+IDD_SETTINGS DIALOGEX 0, 0, 220, 158
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "番茄钟设置"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "番茄钟时长(分钟):", IDC_LABEL_POMODORO, 10, 10, 130, 10
+    EDITTEXT        IDC_POMODORO, 150, 10, 50, 14, ES_NUMBER
+    LTEXT           "短休息时长(分钟):", IDC_LABEL_SHORT_BREAK, 10, 30, 130, 10
+    EDITTEXT        IDC_SHORT_BREAK, 150, 30, 50, 14, ES_NUMBER
+    LTEXT           "长休息时长(分钟):", IDC_LABEL_LONG_BREAK, 10, 50, 130, 10
+    EDITTEXT        IDC_LONG_BREAK, 150, 50, 50, 14, ES_NUMBER
+    LTEXT           "自定义计时时长(分钟):", IDC_LABEL_CUSTOM, 10, 70, 130, 10
+    EDITTEXT        IDC_CUSTOM_TIMER, 150, 70, 50, 14, ES_NUMBER
+    AUTOCHECKBOX    "启用时钟音效", IDC_CLOCK_SOUND, 10, 92, 120, 10
+    AUTOCHECKBOX    "开机启动", IDC_AUTOSTART, 10, 108, 120, 10
+    DEFPUSHBUTTON   "确定", IDC_OK, 60, 132, 50, 14
+    PUSHBUTTON      "取消", IDC_CANCEL, 120, 132, 50, 14
+END
+
+// About Dialog
+IDD_ABOUT DIALOGEX 0, 0, 180, 130
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "关于番茄钟"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "番茄钟计时器 v2.4.0", IDC_ABOUT_TITLE, 10, 10, 160, 10
+    LTEXT           "一个简洁的效率工具", IDC_ABOUT_SUBTITLE, 10, 25, 160, 10
+    LTEXT           "作者: Ferenc Lutischan", IDC_ABOUT_AUTHOR, 10, 40, 160, 10
+    LTEXT           "访问项目主页", IDC_WEBSITE, 10, 55, 160, 10, SS_NOTIFY
+    LTEXT           "支持作者（请喝咖啡）", IDC_COFFEE, 10, 75, 160, 10, SS_NOTIFY
+    DEFPUSHBUTTON   "确定", IDOK, 65, 105, 50, 14
+END
+
+IDI_ICON1 ICON "pomodoro-timer.ico"
+
+// Generic integer input dialog
+IDD_INPUT DIALOGEX 0, 0, 180, 74
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "输入数值"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "请输入数字:", IDC_INPUT_LABEL, 10, 10, 150, 10
+    EDITTEXT        IDC_INPUT_EDIT, 10, 25, 160, 14, ES_AUTOHSCROLL | ES_NUMBER
+    DEFPUSHBUTTON   "确定", IDOK, 40, 50, 45, 14
+    PUSHBUTTON      "取消", IDCANCEL, 95, 50, 45, 14
+END

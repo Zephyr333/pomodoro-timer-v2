@@ -1,0 +1,111 @@
+param(
+    [string]$ExePath = ".\\pomodoro-timer.exe",
+    [int]$BootWaitSeconds = 3
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location -LiteralPath $repoRoot
+
+if (-not (Test-Path -LiteralPath $ExePath)) {
+    throw "Executable not found: $ExePath"
+}
+
+# Force portable mode so data files live in repo root for deterministic checks.
+$regPath = "HKCU:\Software\PomodoroTimer"
+if (-not (Test-Path $regPath)) {
+    New-Item -Path $regPath -Force | Out-Null
+}
+New-ItemProperty -Path $regPath -Name DataLocationMode -PropertyType DWord -Value 0 -Force | Out-Null
+New-ItemProperty -Path $regPath -Name CustomDataPath -PropertyType String -Value "" -Force | Out-Null
+
+$main = Join-Path $repoRoot "pomodoro_settings.json"
+$tmp = Join-Path $repoRoot "pomodoro_settings.json.tmp"
+$bak = Join-Path $repoRoot "pomodoro_settings.json.bak"
+
+$backupDir = Join-Path $repoRoot "tools\\_recovery_test_backup"
+if (Test-Path -LiteralPath $backupDir) {
+    Remove-Item -LiteralPath $backupDir -Recurse -Force
+}
+New-Item -ItemType Directory -Path $backupDir | Out-Null
+
+$allFiles = @($main, $tmp, $bak)
+foreach ($f in $allFiles) {
+    if (Test-Path -LiteralPath $f) {
+        Copy-Item -LiteralPath $f -Destination (Join-Path $backupDir (Split-Path -Leaf $f)) -Force
+    }
+}
+
+function Write-JsonFile {
+    param([string]$Path, [string]$Json)
+    Set-Content -LiteralPath $Path -Value $Json -Encoding ASCII -NoNewline
+}
+
+function Start-And-StopApp {
+    param([string]$Path, [int]$WaitSeconds)
+    $p = Start-Process -FilePath $Path -PassThru
+    Start-Sleep -Seconds $WaitSeconds
+    if (-not $p.HasExited) {
+        Stop-Process -Id $p.Id -Force
+    }
+}
+
+function Assert-FileContains {
+    param([string]$Path, [string]$Needle, [string]$Label)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "[$Label] missing file: $Path"
+    }
+    $content = Get-Content -LiteralPath $Path -Raw
+    if ($content -notmatch [regex]::Escape($Needle)) {
+        throw "[$Label] file does not contain expected marker '$Needle': $Path"
+    }
+}
+
+$validJsonTmp = '{"pomodoro_duration":31,"short_break_duration":5,"long_break_duration":15,"custom_duration":10,"adjust_block_minutes":5,"toast_auto_collapse_seconds":10,"enable_clock_sound":0,"enable_completion_sound":1,"show_completion_dialog":1,"pomodoro_count":7,"idle_mode":0,"idle_break_is_long":0}'
+$validJsonBak = '{"pomodoro_duration":33,"short_break_duration":5,"long_break_duration":15,"custom_duration":10,"adjust_block_minutes":5,"toast_auto_collapse_seconds":10,"enable_clock_sound":0,"enable_completion_sound":1,"show_completion_dialog":1,"pomodoro_count":9,"idle_mode":0,"idle_break_is_long":0}'
+
+$results = @()
+
+try {
+    # Case 1: main missing, tmp valid -> main should be restored from tmp.
+    Remove-Item -LiteralPath $main -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $bak -ErrorAction SilentlyContinue
+    Write-JsonFile -Path $tmp -Json $validJsonTmp
+    Start-And-StopApp -Path $ExePath -WaitSeconds $BootWaitSeconds
+    Assert-FileContains -Path $main -Needle '"pomodoro_duration":31' -Label "case1-main-from-tmp"
+    Assert-FileContains -Path $bak -Needle '"pomodoro_duration":31' -Label "case1-bak-created"
+    $results += "case1: PASS"
+
+    # Case 2: main missing, tmp missing, bak valid -> main should be restored from bak.
+    Remove-Item -LiteralPath $main -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+    Write-JsonFile -Path $bak -Json $validJsonBak
+    Start-And-StopApp -Path $ExePath -WaitSeconds $BootWaitSeconds
+    Assert-FileContains -Path $main -Needle '"pomodoro_duration":33' -Label "case2-main-from-bak"
+    $results += "case2: PASS"
+
+    Write-Host "Recovery chain fault injection test passed:"
+    $results | ForEach-Object { Write-Host "  $_" }
+}
+finally {
+    Stop-Process -Name "pomodoro-timer" -Force -ErrorAction SilentlyContinue
+
+    foreach ($f in $allFiles) {
+        if (Test-Path -LiteralPath $f) {
+            Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    foreach ($name in @("pomodoro_settings.json", "pomodoro_settings.json.tmp", "pomodoro_settings.json.bak")) {
+        $src = Join-Path $backupDir $name
+        if (Test-Path -LiteralPath $src) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $repoRoot $name) -Force
+        }
+    }
+
+    if (Test-Path -LiteralPath $backupDir) {
+        Remove-Item -LiteralPath $backupDir -Recurse -Force
+    }
+}
