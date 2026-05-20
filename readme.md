@@ -2,6 +2,10 @@
 
 一个轻量、常驻系统托盘的番茄钟工具，支持番茄/休息/自定义计时、手动修正时间与计数，并提供按日记录与周月年统计热力图。
 
+## 项目来源
+
+本项目基于 [lutischan-ferenc/pomodoro-timer-v2](https://github.com/lutischan-ferenc/pomodoro-timer-v2) 开发。
+
 ![右键菜单](images/right-click-menu.png "右键菜单")
 
 ## 已实现功能
