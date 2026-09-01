@@ -61,6 +61,7 @@
 #define ID_MENU_DEFAULT_LONG_BREAK 341
 #define ID_MENU_DEFAULT_SHORT_BREAK 342
 #define ID_MENU_IDLE_SHORT_POMODORO 343
+#define ID_MENU_SET_LONG_POMODORO_COUNT 344
 #define TOAST_WINDOW_CLASS L"PomodoroToastClass"
 #define HEATMAP_WINDOW_CLASS L"PomodoroHeatmapClass"
 #define WM_TOAST_NOTIFY (WM_APP + 100)
@@ -116,7 +117,7 @@ static LANG lang_en = {
     L"点击开始长番茄钟",
     L"点击开始休息",
     L"番茄钟设置",
-    L"长番茄钟包含番茄钟数量:",
+    L"长番茄钟时长(分钟):",
     L"短休息时长(分钟):",
     L"长休息时长(分钟):",
     L"启用时钟音效",
@@ -289,6 +290,7 @@ static HMENU g_hMenu = NULL;
 
 // Timer settings structure
 typedef struct {
+    int long_pomodoro_duration;
     int long_pomodoro_count;
     int short_pomodoro_duration;
     int short_break_duration;
@@ -330,7 +332,7 @@ typedef struct {
 } DayCount;
 
 // Global variables
-TimerSettings settings = {2, 45, 5, 15, 10, 5, 10, 0, 1, 1, 1, 0};
+TimerSettings settings = {90, 2, 45, 5, 15, 10, 5, 10, 0, 1, 1, 1, 0};
 int pomodoro_count = 0;
 int is_running = 0;
 int is_paused = 0;
@@ -430,7 +432,7 @@ void ShowAboutDialog(HWND hwndParent);
 void ShowCompletionNotification(HWND hwnd, int completed_mode);
 void start_timer(HWND hwnd, int duration_minutes, TimerMode mode);
 DWORD WINAPI timer_thread(LPVOID lpParam);
-int record_completed_pomodoro(void);
+int record_completed_pomodoros(int completedCount);
 void generate_and_open_report(HWND hwnd);
 void RegisterHeatmapWindowClass(void);
 void ShowHeatmapWindow(HWND hwnd);
@@ -455,6 +457,7 @@ static void load_archive_logs(void);
 static int get_today_count_from_storage(void);
 static void refresh_today_count_if_day_changed(HWND hwnd, int forceRefresh);
 static void add_day_count(DayCount* days, int* dayCount, const char* date, int delta);
+static int parse_pomodoro_log_entry(const char* line, char date[11], int* completedCount);
 static int is_pomodoro_mode(TimerMode mode);
 static int get_long_pomodoro_duration(void);
 static TimerMode get_default_pomodoro_mode(void);
@@ -1124,8 +1127,9 @@ static void load_archive_logs(void) {
         if (!fp) continue;
         while (fgets(line, sizeof(line), fp)) {
             char date[11] = {0};
-            if (sscanf(line, "%10[^,]", date) != 1) continue;
-            add_day_count(g_day_counts, &g_day_count, date, 1);
+            int completedCount = 1;
+            if (!parse_pomodoro_log_entry(line, date, &completedCount)) continue;
+            add_day_count(g_day_counts, &g_day_count, date, completedCount);
         }
         fclose(fp);
     } while (FindNextFileW(hFind, &ffd));
@@ -1134,6 +1138,7 @@ static void load_archive_logs(void) {
 }
 
 static void reset_defaults_keep_data(void) {
+    settings.long_pomodoro_duration = 90;
     settings.long_pomodoro_count = 2;
     settings.short_pomodoro_duration = 45;
     settings.short_break_duration = 5;
@@ -1557,7 +1562,7 @@ static int is_pomodoro_mode(TimerMode mode) {
 }
 
 static int get_long_pomodoro_duration(void) {
-    return clamp_int(settings.short_pomodoro_duration * settings.long_pomodoro_count, 1, 720);
+    return settings.long_pomodoro_duration;
 }
 
 static TimerMode get_default_pomodoro_mode(void) {
@@ -1694,10 +1699,11 @@ DWORD WINAPI timer_thread(LPVOID lpParam) {
             int completed_mode = (int)current_timer_mode;
 
             if (is_pomodoro_mode(current_timer_mode)) {
-                if (record_completed_pomodoro()) {
+                int completedCount = current_timer_mode == TIMER_LONG_POMODORO ? settings.long_pomodoro_count : 1;
+                if (record_completed_pomodoros(completedCount)) {
                     pomodoro_count = get_today_count_from_storage();
                 } else {
-                    pomodoro_count = clamp_int(get_today_count_from_storage() + 1, 0, 9999);
+                    pomodoro_count = clamp_int(get_today_count_from_storage() + completedCount, 0, 9999);
                     if (!sync_today_count_to_target(pomodoro_count)) {
                         OutputDebugStringA("Failed to persist completion to both log and adjustment files.\n");
                     }
@@ -1812,7 +1818,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM 
             // Set dialog title localized
             SetWindowTextW(hwndDlg, g_lang->settings_title);
             // Set label texts (assume label IDs: 201, 202, 203)
-            SetDlgItemTextW(hwndDlg, 201, L"长番茄钟包含番茄钟数量:");
+            SetDlgItemTextW(hwndDlg, 201, L"长番茄钟时长(分钟):");
             SetDlgItemTextW(hwndDlg, IDC_LABEL_SHORT_POMODORO, L"短番茄钟时长(分钟):");
             SetDlgItemTextW(hwndDlg, 202, g_lang->settings_short_break);
             SetDlgItemTextW(hwndDlg, 203, g_lang->settings_long_break);
@@ -1824,7 +1830,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM 
 
             // Set edit values
             char buf[16];
-            snprintf(buf, sizeof(buf), "%d", settings.long_pomodoro_count);
+            snprintf(buf, sizeof(buf), "%d", settings.long_pomodoro_duration);
             SetDlgItemTextA(hwndDlg, IDC_POMODORO, buf);
             snprintf(buf, sizeof(buf), "%d", settings.short_pomodoro_duration);
             SetDlgItemTextA(hwndDlg, IDC_SHORT_POMODORO, buf);
@@ -1849,9 +1855,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM 
                 case IDC_OK: {
                     // Save settings from dialog
                     char buf[16];
-                    int long_pomodoro_count, short_pomodoro, short_break, long_break, custom_timer;
+                    int long_pomodoro, short_pomodoro, short_break, long_break, custom_timer;
                     GetDlgItemTextA(hwndDlg, IDC_POMODORO, buf, sizeof(buf));
-                    long_pomodoro_count = atoi(buf);
+                    long_pomodoro = atoi(buf);
                     GetDlgItemTextA(hwndDlg, IDC_SHORT_POMODORO, buf, sizeof(buf));
                     short_pomodoro = atoi(buf);
                     GetDlgItemTextA(hwndDlg, IDC_SHORT_BREAK, buf, sizeof(buf));
@@ -1862,14 +1868,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM 
                     custom_timer = atoi(buf);
                     
                     // Validate values
-                    if (long_pomodoro_count > 0 && long_pomodoro_count <= 12 &&
+                    if (long_pomodoro > 0 && long_pomodoro <= 720 &&
                         short_pomodoro > 0 && short_pomodoro <= 720 &&
-                        short_pomodoro * long_pomodoro_count <= 720 &&
                         short_break > 0 && short_break <= 60 && 
                         long_break > 0 && long_break <= 120 &&
                         custom_timer > 0 && custom_timer <= 720) {
                         
-                        settings.long_pomodoro_count = long_pomodoro_count;
+                        settings.long_pomodoro_duration = long_pomodoro;
                         settings.short_pomodoro_duration = short_pomodoro;
                         settings.short_break_duration = short_break;
                         settings.long_break_duration = long_break;
@@ -1927,7 +1932,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.1");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.2");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -2445,18 +2450,35 @@ static int get_year_total(int year) {
     return total;
 }
 
-int record_completed_pomodoro(void) {
+static int parse_pomodoro_log_entry(const char* line, char date[11], int* completedCount) {
+    int count = 1;
+
+    if (!line || !date || !completedCount) return 0;
+    date[0] = '\0';
+    if (sscanf(line, "%10[^,],%*[^,],%d", date, &count) == 2) {
+        *completedCount = clamp_int(count, 1, 12);
+        return 1;
+    }
+    if (sscanf(line, "%10[^,]", date) == 1) {
+        *completedCount = 1;
+        return 1;
+    }
+    return 0;
+}
+
+int record_completed_pomodoros(int completedCount) {
     time_t now = time(NULL);
     struct tm* tmNow = localtime(&now);
+    completedCount = clamp_int(completedCount, 1, 12);
     maybe_archive_log_monthly();
     FILE* fp = _wfopen(g_log_path, L"a");
     if (!fp || !tmNow) {
         if (fp) fclose(fp);
         return 0;
     }
-    fprintf(fp, "%04d-%02d-%02d,%02d:%02d:%02d\n",
+    fprintf(fp, "%04d-%02d-%02d,%02d:%02d:%02d,%d\n",
         tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday,
-        tmNow->tm_hour, tmNow->tm_min, tmNow->tm_sec);
+        tmNow->tm_hour, tmNow->tm_min, tmNow->tm_sec, completedCount);
     fclose(fp);
 
     if (g_hHeatmapWnd) InvalidateRect(g_hHeatmapWnd, NULL, TRUE);
@@ -2480,8 +2502,9 @@ static int get_today_count_from_storage(void) {
     if (in) {
         while (fgets(line, sizeof(line), in)) {
             char date[11] = {0};
-            if (sscanf(line, "%10[^,]", date) != 1) continue;
-            if (strcmp(date, today) == 0) count++;
+            int completedCount = 1;
+            if (!parse_pomodoro_log_entry(line, date, &completedCount)) continue;
+            if (strcmp(date, today) == 0) count += completedCount;
         }
         fclose(in);
     }
@@ -2552,9 +2575,10 @@ static void load_heatmap_data(void) {
     if (in) {
         while (fgets(line, sizeof(line), in)) {
             char date[11] = {0};
+            int completedCount = 1;
 
-            if (sscanf(line, "%10[^,]", date) != 1) continue;
-            add_day_count(g_day_counts, &g_day_count, date, 1);
+            if (!parse_pomodoro_log_entry(line, date, &completedCount)) continue;
+            add_day_count(g_day_counts, &g_day_count, date, completedCount);
         }
         fclose(in);
     }
@@ -2927,10 +2951,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hAdjustMenu, MF_STRING, ID_MENU_SET_TIME, L"修改当前剩余时间(分钟)");
                 AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_PLUS_5_MIN, L"增加步进时间");
                 AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_MINUS_5_MIN, L"减少步进时间");
+                AppendMenu(hAdjustMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_SET_LONG_POMODORO_COUNT, L"长番茄钟番茄钟数");
                 AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_SET_COUNT, L"修改今日番茄数");
                 AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_RESET_COUNT, L"番茄计数清零");
 
-                AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_POMODORO_DURATION, L"长番茄钟包含番茄钟数量");
+                AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_POMODORO_DURATION, L"长番茄钟时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_SHORT_POMODORO_DURATION, L"短番茄钟时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_SHORT_BREAK_DURATION, L"短休息时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_LONG_BREAK_DURATION, L"长休息时长(分钟)");
@@ -3068,23 +3094,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         save_settings();
                         break;
                     case ID_MENU_SET_POMODORO_DURATION: {
-                        int count = settings.long_pomodoro_count;
-                        int maxCount = 720 / settings.short_pomodoro_duration;
-                        wchar_t countPrompt[128];
-                        if (maxCount > 12) maxCount = 12;
-                        if (maxCount < 1) maxCount = 1;
-                        swprintf(countPrompt, 128, L"请输入长番茄钟等于几个番茄钟(1-%d):", maxCount);
-                        if (PromptForInteger(hwnd, L"长番茄钟数量", countPrompt, count, 1, maxCount, &count)) {
-                            settings.long_pomodoro_count = count;
+                        int minutes = settings.long_pomodoro_duration;
+                        if (PromptForInteger(hwnd, L"长番茄钟时长", L"请输入长番茄钟时长(1-720分钟):", minutes, 1, 720, &minutes)) {
+                            settings.long_pomodoro_duration = minutes;
                             save_settings();
                         }
                         break;
                     }
                     case ID_MENU_SET_SHORT_POMODORO_DURATION: {
                         int minutes = settings.short_pomodoro_duration;
-                        int maxMinutes = 720 / settings.long_pomodoro_count;
-                        if (PromptForInteger(hwnd, L"短番茄钟时长", L"请输入短番茄钟时长(分钟，长番茄钟总时长不超过720分钟):", minutes, 1, maxMinutes, &minutes)) {
+                        if (PromptForInteger(hwnd, L"短番茄钟时长", L"请输入短番茄钟时长(1-720分钟):", minutes, 1, 720, &minutes)) {
                             settings.short_pomodoro_duration = minutes;
+                            save_settings();
+                        }
+                        break;
+                    }
+                    case ID_MENU_SET_LONG_POMODORO_COUNT: {
+                        int count = settings.long_pomodoro_count;
+                        if (PromptForInteger(hwnd, L"长番茄钟番茄钟数", L"请输入长番茄钟完成后计入的番茄钟数(1-12):", count, 1, 12, &count)) {
+                            settings.long_pomodoro_count = count;
                             save_settings();
                         }
                         break;
@@ -3381,6 +3409,7 @@ static int read_settings_json_buffer(char* buf, size_t bufSize) {
 void load_settings() {
     if (g_settings_lock_ready) EnterCriticalSection(&g_settings_file_lock);
 
+    settings.long_pomodoro_duration = 90;
     settings.long_pomodoro_count = 2;
     settings.short_pomodoro_duration = 45;
     settings.short_break_duration = 5;
@@ -3401,6 +3430,8 @@ void load_settings() {
     {
         char buf[1024] = {0};
         if (read_settings_json_buffer(buf, sizeof(buf))) {
+            settings.long_pomodoro_duration = extract_json_int(buf, "\"long_pomodoro_duration\"",
+                extract_json_int(buf, "\"pomodoro_duration\"", settings.long_pomodoro_duration));
             settings.short_pomodoro_duration = extract_json_int(buf, "\"short_pomodoro_duration\"", settings.short_pomodoro_duration);
             settings.long_pomodoro_count = extract_json_int(buf, "\"long_pomodoro_count\"", settings.long_pomodoro_count);
             settings.short_break_duration = extract_json_int(buf, "\"short_break_duration\"", settings.short_break_duration);
@@ -3420,12 +3451,9 @@ void load_settings() {
         }
     }
 
+    settings.long_pomodoro_duration = clamp_int(settings.long_pomodoro_duration, 1, 720);
     settings.short_pomodoro_duration = clamp_int(settings.short_pomodoro_duration, 1, 720);
     settings.long_pomodoro_count = clamp_int(settings.long_pomodoro_count, 1, 12);
-    if (settings.short_pomodoro_duration * settings.long_pomodoro_count > 720) {
-        settings.long_pomodoro_count = 720 / settings.short_pomodoro_duration;
-        if (settings.long_pomodoro_count < 1) settings.long_pomodoro_count = 1;
-    }
     settings.short_break_duration = clamp_int(settings.short_break_duration, 1, 60);
     settings.long_break_duration = clamp_int(settings.long_break_duration, 1, 120);
     settings.custom_duration = clamp_int(settings.custom_duration, 1, 720);
@@ -3450,7 +3478,7 @@ void load_settings() {
 int save_settings(void) {
     int saved = 0;
     int writeOk = 0;
-    int longDuration = get_long_pomodoro_duration();
+    int longDuration = settings.long_pomodoro_duration;
 
     if (g_settings_lock_ready) EnterCriticalSection(&g_settings_file_lock);
 
