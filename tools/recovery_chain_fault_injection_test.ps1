@@ -13,8 +13,22 @@ if (-not (Test-Path -LiteralPath $ExePath)) {
     throw "Executable not found: $ExePath"
 }
 
+$resolvedExe = (Resolve-Path -LiteralPath $ExePath).Path
+$runningProject = Get-Process -Name "pomodoro-timer" -ErrorAction SilentlyContinue | Where-Object {
+    $_.Path -and $_.Path -eq $resolvedExe
+}
+if ($runningProject) {
+    throw "The project executable is running. Exit it before running recovery tests."
+}
+
 # Force portable mode so data files live in repo root for deterministic checks.
 $regPath = "HKCU:\Software\PomodoroTimer"
+$regExisted = Test-Path $regPath
+$oldReg = if ($regExisted) { Get-ItemProperty -Path $regPath } else { $null }
+$hadMode = $regExisted -and ($oldReg.PSObject.Properties.Name -contains "DataLocationMode")
+$hadCustomPath = $regExisted -and ($oldReg.PSObject.Properties.Name -contains "CustomDataPath")
+$oldMode = if ($hadMode) { $oldReg.DataLocationMode } else { $null }
+$oldCustomPath = if ($hadCustomPath) { $oldReg.CustomDataPath } else { $null }
 if (-not (Test-Path $regPath)) {
     New-Item -Path $regPath -Force | Out-Null
 }
@@ -26,6 +40,10 @@ $tmp = Join-Path $repoRoot "pomodoro_settings.json.tmp"
 $bak = Join-Path $repoRoot "pomodoro_settings.json.bak"
 
 $backupDir = Join-Path $repoRoot "tools\\_recovery_test_backup"
+$expectedBackupParent = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "tools"))
+if ([System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($backupDir)) -ne $expectedBackupParent) {
+    throw "Unexpected recovery backup path: $backupDir"
+}
 if (Test-Path -LiteralPath $backupDir) {
     Remove-Item -LiteralPath $backupDir -Recurse -Force
 }
@@ -45,10 +63,14 @@ function Write-JsonFile {
 
 function Start-And-StopApp {
     param([string]$Path, [int]$WaitSeconds)
-    $p = Start-Process -FilePath $Path -PassThru
-    Start-Sleep -Seconds $WaitSeconds
-    if (-not $p.HasExited) {
-        Stop-Process -Id $p.Id -Force
+    $p = Start-Process -FilePath $Path -PassThru -WindowStyle Hidden
+    try {
+        Start-Sleep -Seconds $WaitSeconds
+    }
+    finally {
+        if (-not $p.HasExited) {
+            Stop-Process -Id $p.Id -Force
+        }
     }
 }
 
@@ -63,8 +85,8 @@ function Assert-FileContains {
     }
 }
 
-$validJsonTmp = '{"pomodoro_duration":31,"short_break_duration":5,"long_break_duration":15,"custom_duration":10,"adjust_block_minutes":5,"toast_auto_collapse_seconds":10,"enable_clock_sound":0,"enable_completion_sound":1,"show_completion_dialog":1,"pomodoro_count":7,"idle_mode":0,"idle_break_is_long":0}'
-$validJsonBak = '{"pomodoro_duration":33,"short_break_duration":5,"long_break_duration":15,"custom_duration":10,"adjust_block_minutes":5,"toast_auto_collapse_seconds":10,"enable_clock_sound":0,"enable_completion_sound":1,"show_completion_dialog":1,"pomodoro_count":9,"idle_mode":0,"idle_break_is_long":0}'
+$validJsonTmp = '{"pomodoro_duration":90,"long_pomodoro_duration":90,"long_pomodoro_count":2,"short_pomodoro_duration":45,"short_break_duration":5,"long_break_duration":15,"custom_duration":10,"adjust_block_minutes":5,"toast_auto_collapse_seconds":10,"enable_clock_sound":0,"enable_completion_sound":1,"show_completion_dialog":1,"default_pomodoro_is_long":1,"default_break_is_long":0,"pomodoro_count":7,"idle_mode":0,"idle_pomodoro_is_long":1,"idle_break_is_long":0}'
+$validJsonBak = '{"pomodoro_duration":135,"long_pomodoro_duration":135,"long_pomodoro_count":3,"short_pomodoro_duration":45,"short_break_duration":5,"long_break_duration":15,"custom_duration":10,"adjust_block_minutes":5,"toast_auto_collapse_seconds":10,"enable_clock_sound":0,"enable_completion_sound":1,"show_completion_dialog":1,"default_pomodoro_is_long":1,"default_break_is_long":0,"pomodoro_count":9,"idle_mode":0,"idle_pomodoro_is_long":1,"idle_break_is_long":0}'
 
 $results = @()
 
@@ -74,8 +96,8 @@ try {
     Remove-Item -LiteralPath $bak -ErrorAction SilentlyContinue
     Write-JsonFile -Path $tmp -Json $validJsonTmp
     Start-And-StopApp -Path $ExePath -WaitSeconds $BootWaitSeconds
-    Assert-FileContains -Path $main -Needle '"pomodoro_duration":31' -Label "case1-main-from-tmp"
-    Assert-FileContains -Path $bak -Needle '"pomodoro_duration":31' -Label "case1-bak-created"
+    Assert-FileContains -Path $main -Needle '"long_pomodoro_count":2' -Label "case1-main-from-tmp"
+    Assert-FileContains -Path $bak -Needle '"long_pomodoro_count":2' -Label "case1-bak-created"
     $results += "case1: PASS"
 
     # Case 2: main missing, tmp missing, bak valid -> main should be restored from bak.
@@ -83,15 +105,13 @@ try {
     Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
     Write-JsonFile -Path $bak -Json $validJsonBak
     Start-And-StopApp -Path $ExePath -WaitSeconds $BootWaitSeconds
-    Assert-FileContains -Path $main -Needle '"pomodoro_duration":33' -Label "case2-main-from-bak"
+    Assert-FileContains -Path $main -Needle '"long_pomodoro_count":3' -Label "case2-main-from-bak"
     $results += "case2: PASS"
 
     Write-Host "Recovery chain fault injection test passed:"
     $results | ForEach-Object { Write-Host "  $_" }
 }
 finally {
-    Stop-Process -Name "pomodoro-timer" -Force -ErrorAction SilentlyContinue
-
     foreach ($f in $allFiles) {
         if (Test-Path -LiteralPath $f) {
             Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
@@ -107,5 +127,20 @@ finally {
 
     if (Test-Path -LiteralPath $backupDir) {
         Remove-Item -LiteralPath $backupDir -Recurse -Force
+    }
+
+    if ($regExisted) {
+        if ($hadMode) {
+            New-ItemProperty -Path $regPath -Name DataLocationMode -PropertyType DWord -Value $oldMode -Force | Out-Null
+        } else {
+            Remove-ItemProperty -Path $regPath -Name DataLocationMode -ErrorAction SilentlyContinue
+        }
+        if ($hadCustomPath) {
+            New-ItemProperty -Path $regPath -Name CustomDataPath -PropertyType String -Value $oldCustomPath -Force | Out-Null
+        } else {
+            Remove-ItemProperty -Path $regPath -Name CustomDataPath -ErrorAction SilentlyContinue
+        }
+    } elseif (Test-Path $regPath) {
+        Remove-Item -Path $regPath -Recurse -Force
     }
 }

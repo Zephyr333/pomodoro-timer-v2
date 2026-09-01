@@ -1,4 +1,5 @@
 #include <windows.h>
+#pragma code_page(65001)
 
 // Dialog IDs
 #define IDD_SETTINGS 100
@@ -20,6 +21,12 @@
 #define IDC_LABEL_LONG_BREAK 203
 #define IDC_LABEL_CUSTOM 204
 #define IDC_CUSTOM_TIMER 205
+#define IDC_SHORT_POMODORO 220
+#define IDC_LABEL_SHORT_POMODORO 221
+#define IDC_DEFAULT_LONG_POMODORO 222
+#define IDC_DEFAULT_SHORT_POMODORO 223
+#define IDC_DEFAULT_SHORT_BREAK 224
+#define IDC_DEFAULT_LONG_BREAK 225
 #define IDC_ABOUT_TITLE 210
 #define IDC_ABOUT_SUBTITLE 211
 #define IDC_ABOUT_AUTHOR 212
@@ -29,23 +36,31 @@ CLOCK_WAV WAV "clock.wav"
 DING_WAV WAV "ding.wav"
 
 // Settings Dialog
-IDD_SETTINGS DIALOGEX 0, 0, 220, 158
+IDD_SETTINGS DIALOGEX 0, 0, 220, 242
 STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "番茄钟设置"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT           "番茄钟时长(分钟):", IDC_LABEL_POMODORO, 10, 10, 130, 10
+    LTEXT           "长番茄钟包含番茄钟数量:", IDC_LABEL_POMODORO, 10, 10, 140, 10
     EDITTEXT        IDC_POMODORO, 150, 10, 50, 14, ES_NUMBER
-    LTEXT           "短休息时长(分钟):", IDC_LABEL_SHORT_BREAK, 10, 30, 130, 10
-    EDITTEXT        IDC_SHORT_BREAK, 150, 30, 50, 14, ES_NUMBER
-    LTEXT           "长休息时长(分钟):", IDC_LABEL_LONG_BREAK, 10, 50, 130, 10
-    EDITTEXT        IDC_LONG_BREAK, 150, 50, 50, 14, ES_NUMBER
-    LTEXT           "自定义计时时长(分钟):", IDC_LABEL_CUSTOM, 10, 70, 130, 10
-    EDITTEXT        IDC_CUSTOM_TIMER, 150, 70, 50, 14, ES_NUMBER
-    AUTOCHECKBOX    "启用时钟音效", IDC_CLOCK_SOUND, 10, 92, 120, 10
-    AUTOCHECKBOX    "开机启动", IDC_AUTOSTART, 10, 108, 120, 10
-    DEFPUSHBUTTON   "确定", IDC_OK, 60, 132, 50, 14
-    PUSHBUTTON      "取消", IDC_CANCEL, 120, 132, 50, 14
+    LTEXT           "短番茄钟时长(分钟):", IDC_LABEL_SHORT_POMODORO, 10, 30, 130, 10
+    EDITTEXT        IDC_SHORT_POMODORO, 150, 30, 50, 14, ES_NUMBER
+    LTEXT           "短休息时长(分钟):", IDC_LABEL_SHORT_BREAK, 10, 50, 130, 10
+    EDITTEXT        IDC_SHORT_BREAK, 150, 50, 50, 14, ES_NUMBER
+    LTEXT           "长休息时长(分钟):", IDC_LABEL_LONG_BREAK, 10, 70, 130, 10
+    EDITTEXT        IDC_LONG_BREAK, 150, 70, 50, 14, ES_NUMBER
+    LTEXT           "自定义计时时长(分钟):", IDC_LABEL_CUSTOM, 10, 90, 130, 10
+    EDITTEXT        IDC_CUSTOM_TIMER, 150, 90, 50, 14, ES_NUMBER
+    GROUPBOX        "默认番茄钟", -1, 10, 112, 200, 32
+    AUTORADIOBUTTON "长番茄钟", IDC_DEFAULT_LONG_POMODORO, 20, 126, 75, 10, WS_GROUP
+    AUTORADIOBUTTON "短番茄钟", IDC_DEFAULT_SHORT_POMODORO, 110, 126, 75, 10
+    GROUPBOX        "默认休息", -1, 10, 148, 200, 32
+    AUTORADIOBUTTON "短休息", IDC_DEFAULT_SHORT_BREAK, 20, 162, 75, 10, WS_GROUP
+    AUTORADIOBUTTON "长休息", IDC_DEFAULT_LONG_BREAK, 110, 162, 75, 10
+    AUTOCHECKBOX    "启用时钟音效", IDC_CLOCK_SOUND, 10, 188, 120, 10
+    AUTOCHECKBOX    "开机启动", IDC_AUTOSTART, 10, 204, 120, 10
+    DEFPUSHBUTTON   "确定", IDC_OK, 60, 224, 50, 14
+    PUSHBUTTON      "取消", IDC_CANCEL, 120, 224, 50, 14
 END
 
 // About Dialog
@@ -54,7 +69,7 @@ STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "关于番茄钟"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT           "番茄钟计时器 v2.4.0", IDC_ABOUT_TITLE, 10, 10, 160, 10
+    LTEXT           "番茄钟计时器 v2.5.1", IDC_ABOUT_TITLE, 10, 10, 160, 10
     LTEXT           "一个简洁的效率工具", IDC_ABOUT_SUBTITLE, 10, 25, 160, 10
     LTEXT           "作者: Ferenc Lutischan", IDC_ABOUT_AUTHOR, 10, 40, 160, 10
     LTEXT           "访问项目主页", IDC_WEBSITE, 10, 55, 160, 10, SS_NOTIFY
@@ -63,6 +78,34 @@ BEGIN
 END
 
 IDI_ICON1 ICON "pomodoro-timer.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 2,5,1,0
+ PRODUCTVERSION 2,5,1,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName", "Pomodoro Timer Contributors\0"
+            VALUE "FileDescription", "番茄钟计时器\0"
+            VALUE "FileVersion", "2.5.1\0"
+            VALUE "InternalName", "pomodoro-timer\0"
+            VALUE "OriginalFilename", "pomodoro-timer.exe\0"
+            VALUE "ProductName", "番茄钟计时器\0"
+            VALUE "ProductVersion", "2.5.1\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
 
 // Generic integer input dialog
 IDD_INPUT DIALOGEX 0, 0, 180, 74

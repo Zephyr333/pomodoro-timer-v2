@@ -54,9 +54,17 @@
 #define ID_MENU_IDLE_LONG_BREAK 334
 #define ID_MENU_COMPLETION_SOUND 335
 #define ID_MENU_SET_TIME_BLOCK 336
+#define ID_MENU_START_SHORT_POMODORO 337
+#define ID_MENU_SET_SHORT_POMODORO_DURATION 338
+#define ID_MENU_DEFAULT_LONG_POMODORO 339
+#define ID_MENU_DEFAULT_SHORT_POMODORO 340
+#define ID_MENU_DEFAULT_LONG_BREAK 341
+#define ID_MENU_DEFAULT_SHORT_BREAK 342
+#define ID_MENU_IDLE_SHORT_POMODORO 343
 #define TOAST_WINDOW_CLASS L"PomodoroToastClass"
 #define HEATMAP_WINDOW_CLASS L"PomodoroHeatmapClass"
 #define WM_TOAST_NOTIFY (WM_APP + 100)
+#define WM_SETTINGS_SAVE_FAILED (WM_APP + 101)
 #define ID_TOAST_ACTION 2001
 #define ID_TOAST_CLOSE 2002
 #define ID_TOAST_COLLAPSE 2003
@@ -94,7 +102,7 @@ typedef struct {
 
 // Language definitions
 static LANG lang_en = {
-    L"开始番茄钟",
+    L"开始长番茄钟",
     L"开始休息",
     L"开始长休息",
     L"时钟音效",
@@ -105,10 +113,10 @@ static LANG lang_en = {
     L"关于",
     L"退出",
     L"重置番茄钟计数",
-    L"点击开始番茄钟",
+    L"点击开始长番茄钟",
     L"点击开始休息",
     L"番茄钟设置",
-    L"番茄时长(分钟):",
+    L"长番茄钟包含番茄钟数量:",
     L"短休息时长(分钟):",
     L"长休息时长(分钟):",
     L"启用时钟音效",
@@ -281,7 +289,8 @@ static HMENU g_hMenu = NULL;
 
 // Timer settings structure
 typedef struct {
-    int pomodoro_duration;
+    int long_pomodoro_count;
+    int short_pomodoro_duration;
     int short_break_duration;
     int long_break_duration;
     int custom_duration;
@@ -290,6 +299,8 @@ typedef struct {
     int enable_clock_sound;
     int enable_completion_sound;
     int show_completion_dialog;
+    int default_pomodoro_is_long;
+    int default_break_is_long;
 } TimerSettings;
 
 typedef enum {
@@ -300,10 +311,11 @@ typedef enum {
 
 typedef enum {
     TIMER_NONE = 0,
-    TIMER_POMODORO = 1,
+    TIMER_LONG_POMODORO = 1,
     TIMER_SHORT_BREAK = 2,
     TIMER_LONG_BREAK = 3,
-    TIMER_CUSTOM = 4
+    TIMER_CUSTOM = 4,
+    TIMER_SHORT_POMODORO = 5
 } TimerMode;
 
 typedef enum {
@@ -318,7 +330,7 @@ typedef struct {
 } DayCount;
 
 // Global variables
-TimerSettings settings = {25, 5, 15, 10, 5, 10, 0, 1, 1};
+TimerSettings settings = {2, 45, 5, 15, 10, 5, 10, 0, 1, 1, 1, 0};
 int pomodoro_count = 0;
 int is_running = 0;
 int is_paused = 0;
@@ -326,6 +338,7 @@ int is_in_pomodoro = 0;
 int remaining_seconds = 0;
 TimerMode current_timer_mode = TIMER_NONE;
 IdleMode idle_mode = IDLE_POMODORO;
+int idle_pomodoro_is_long = 1;
 int idle_break_is_long = 0;
 NOTIFYICONDATA nid = {0};
 HANDLE timer_thread_handle = NULL;
@@ -345,6 +358,7 @@ static HWND g_hToastCollapseButton = NULL;
 static int g_toast_collapsed = 0;
 static RECT g_toast_expanded_rect = {0};
 static HWND g_hHeatmapWnd = NULL;
+static UINT g_taskbar_created_message = 0;
 static DayCount g_day_counts[4096];
 static int g_day_count = 0;
 static int g_heatmap_weekTotal = 0;
@@ -394,21 +408,28 @@ static int get_visible_dots(int total_count) {
 #define IDC_INPUT_EDIT 111
 #define IDC_LABEL_CUSTOM 204
 #define IDC_CUSTOM_TIMER 205
+#define IDC_SHORT_POMODORO 220
+#define IDC_LABEL_SHORT_POMODORO 221
+#define IDC_DEFAULT_LONG_POMODORO 222
+#define IDC_DEFAULT_SHORT_POMODORO 223
+#define IDC_DEFAULT_SHORT_BREAK 224
+#define IDC_DEFAULT_LONG_BREAK 225
 
 // Function prototypes
 void load_settings();
-void save_settings();
+int save_settings(void);
 void update_tray_icon(HWND hwnd, const wchar_t* text, int dots, int seconds);
 void play_resource_sound(const char* resourceName);
 int is_autostart_enabled();
 void RefreshMenuText(void);
-void set_autostart(int enable);
+int set_autostart(int enable);
 INT_PTR CALLBACK SettingsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 void ShowSettingsDialog(HWND hwndParent);
 void ShowAboutDialog(HWND hwndParent);
 void ShowCompletionNotification(HWND hwnd, int completed_mode);
 void start_timer(HWND hwnd, int duration_minutes, TimerMode mode);
+DWORD WINAPI timer_thread(LPVOID lpParam);
 int record_completed_pomodoro(void);
 void generate_and_open_report(HWND hwnd);
 void RegisterHeatmapWindowClass(void);
@@ -421,7 +442,7 @@ static int get_day_count_value(int year, int month, int day);
 static int sync_today_count_to_target(int targetCount);
 static void build_data_file_paths(void);
 static void load_data_location_from_registry(void);
-static void save_data_location_to_registry(void);
+static int save_data_location_to_registry(void);
 static int switch_data_location(HWND hwnd, DataLocationMode mode, const wchar_t* customPath);
 static int choose_folder_dialog(HWND owner, const wchar_t* title, wchar_t* outPath, size_t outChars);
 static int export_data_to_folder(HWND hwnd);
@@ -434,7 +455,10 @@ static void load_archive_logs(void);
 static int get_today_count_from_storage(void);
 static void refresh_today_count_if_day_changed(HWND hwnd, int forceRefresh);
 static void add_day_count(DayCount* days, int* dayCount, const char* date, int delta);
-static void sync_idle_break_type_with_count(void);
+static int is_pomodoro_mode(TimerMode mode);
+static int get_long_pomodoro_duration(void);
+static TimerMode get_default_pomodoro_mode(void);
+static TimerMode get_default_break_mode(void);
 
 static int clamp_int(int value, int minValue, int maxValue) {
     if (value < minValue) return minValue;
@@ -498,8 +522,9 @@ static int resolve_data_dir_for_mode(DataLocationMode mode, const wchar_t* custo
     if (!outDir || outChars == 0) return 0;
     outDir[0] = L'\0';
     if (mode == DATA_LOC_ONEDRIVE) {
-        if (get_onedrive_directory(outDir, outChars)) {
-            join_path(outDir, outChars, outDir, L"PomodoroTimer");
+        wchar_t oneDriveDir[MAX_PATH] = L"";
+        if (get_onedrive_directory(oneDriveDir, MAX_PATH)) {
+            join_path(outDir, outChars, oneDriveDir, L"PomodoroTimer");
             return 1;
         }
         return 0;
@@ -512,14 +537,18 @@ static int resolve_data_dir_for_mode(DataLocationMode mode, const wchar_t* custo
     return 1;
 }
 
-static void save_data_location_to_registry(void) {
+static int save_data_location_to_registry(void) {
     HKEY hKey;
+    LONG modeResult;
+    LONG pathResult;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\PomodoroTimer", 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
         DWORD mode = (DWORD)g_data_location_mode;
-        RegSetValueExW(hKey, L"DataLocationMode", 0, REG_DWORD, (const BYTE*)&mode, sizeof(DWORD));
-        RegSetValueExW(hKey, L"CustomDataPath", 0, REG_SZ, (const BYTE*)g_custom_data_dir, (DWORD)((wcslen(g_custom_data_dir) + 1) * sizeof(wchar_t)));
+        modeResult = RegSetValueExW(hKey, L"DataLocationMode", 0, REG_DWORD, (const BYTE*)&mode, sizeof(DWORD));
+        pathResult = RegSetValueExW(hKey, L"CustomDataPath", 0, REG_SZ, (const BYTE*)g_custom_data_dir, (DWORD)((wcslen(g_custom_data_dir) + 1) * sizeof(wchar_t)));
         RegCloseKey(hKey);
+        return modeResult == ERROR_SUCCESS && pathResult == ERROR_SUCCESS;
     }
+    return 0;
 }
 
 static void load_data_location_from_registry(void) {
@@ -604,23 +633,13 @@ static int migrate_data_files(const wchar_t* oldDir, const wchar_t* newDir, int*
 
         if (expectedCount) (*expectedCount)++;
 
-        if (MoveFileExW(src, dst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-            if (migratedCount) (*migratedCount)++;
-            continue;
-        }
-
-        if (CopyFileW(src, dst, FALSE) && DeleteFileW(src)) {
+        if (CopyFileW(src, dst, TRUE)) {
             if (migratedCount) (*migratedCount)++;
             continue;
         }
 
         ok = 0;
         if (failedCount) (*failedCount)++;
-    }
-
-    if (ok) {
-        // If old directory became empty after migration, remove it quietly.
-        RemoveDirectoryW(oldDir);
     }
 
     return ok;
@@ -645,12 +664,7 @@ static int migrate_archive_logs(const wchar_t* oldDir, const wchar_t* newDir, in
         swprintf(src, MAX_PATH, L"%ls\\%ls", oldDir, ffd.cFileName);
         swprintf(dst, MAX_PATH, L"%ls\\%ls", newDir, ffd.cFileName);
 
-        if (MoveFileExW(src, dst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-            if (migratedCount) (*migratedCount)++;
-            continue;
-        }
-
-        if (CopyFileW(src, dst, FALSE) && DeleteFileW(src)) {
+        if (CopyFileW(src, dst, TRUE)) {
             if (migratedCount) (*migratedCount)++;
             continue;
         }
@@ -660,6 +674,59 @@ static int migrate_archive_logs(const wchar_t* oldDir, const wchar_t* newDir, in
     } while (FindNextFileW(hFind, &ffd));
 
     FindClose(hFind);
+    return ok;
+}
+
+static int directory_has_data_files(const wchar_t* dir) {
+    WIN32_FIND_DATAW ffd;
+    HANDLE hFind;
+    wchar_t path[MAX_PATH];
+    wchar_t pattern[MAX_PATH];
+    static const wchar_t* names[] = {L"pomodoro_settings.json", L"pomodoro_settings.json.tmp", L"pomodoro_settings.json.bak", L"pomodoro_log.csv", L"pomodoro_adjustments.csv"};
+    int i;
+
+    for (i = 0; i < (int)(sizeof(names) / sizeof(names[0])); ++i) {
+        DWORD attr;
+        join_path(path, MAX_PATH, dir, names[i]);
+        attr = GetFileAttributesW(path);
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) return 1;
+    }
+
+    swprintf(pattern, MAX_PATH, L"%ls\\pomodoro_log_*.csv", dir);
+    hFind = FindFirstFileW(pattern, &ffd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        FindClose(hFind);
+        return 1;
+    }
+    return 0;
+}
+
+static int delete_data_files_in_directory(const wchar_t* dir) {
+    WIN32_FIND_DATAW ffd;
+    HANDLE hFind;
+    wchar_t path[MAX_PATH];
+    wchar_t pattern[MAX_PATH];
+    static const wchar_t* names[] = {L"pomodoro_settings.json", L"pomodoro_settings.json.tmp", L"pomodoro_settings.json.bak", L"pomodoro_log.csv", L"pomodoro_adjustments.csv"};
+    int ok = 1;
+    int i;
+
+    for (i = 0; i < (int)(sizeof(names) / sizeof(names[0])); ++i) {
+        DWORD attr;
+        join_path(path, MAX_PATH, dir, names[i]);
+        attr = GetFileAttributesW(path);
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY) && !DeleteFileW(path)) ok = 0;
+    }
+
+    swprintf(pattern, MAX_PATH, L"%ls\\pomodoro_log_*.csv", dir);
+    hFind = FindFirstFileW(pattern, &ffd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            swprintf(path, MAX_PATH, L"%ls\\%ls", dir, ffd.cFileName);
+            if (!DeleteFileW(path)) ok = 0;
+        } while (FindNextFileW(hFind, &ffd));
+        FindClose(hFind);
+    }
     return ok;
 }
 
@@ -682,9 +749,12 @@ static int choose_folder_dialog(HWND owner, const wchar_t* title, wchar_t* outPa
 static int switch_data_location(HWND hwnd, DataLocationMode mode, const wchar_t* customPath) {
     wchar_t targetDir[MAX_PATH];
     wchar_t prevDir[MAX_PATH];
+    wchar_t prevCustomDir[MAX_PATH];
+    DataLocationMode prevMode = g_data_location_mode;
     int migrated = 0;
     int failed = 0;
     int expected = 0;
+    int copiedForSwitch = 0;
 
     if (is_running || is_paused) {
         MessageBoxW(hwnd, L"计时进行中，无法切换数据位置。", L"提示", MB_OK | MB_ICONINFORMATION);
@@ -698,24 +768,36 @@ static int switch_data_location(HWND hwnd, DataLocationMode mode, const wchar_t*
 
     wcsncpy(prevDir, g_data_dir, MAX_PATH - 1);
     prevDir[MAX_PATH - 1] = L'\0';
+    wcsncpy(prevCustomDir, g_custom_data_dir, MAX_PATH - 1);
+    prevCustomDir[MAX_PATH - 1] = L'\0';
     ensure_directory_exists(targetDir);
-    save_settings();
+    {
+        DWORD targetAttr = GetFileAttributesW(targetDir);
+        if (targetAttr == INVALID_FILE_ATTRIBUTES || !(targetAttr & FILE_ATTRIBUTE_DIRECTORY)) {
+            MessageBoxW(hwnd, L"无法创建或访问目标数据目录。", L"错误", MB_OK | MB_ICONERROR);
+            return 0;
+        }
+    }
+    if (!save_settings()) return 0;
 
     if (prevDir[0] && _wcsicmp(prevDir, targetDir) != 0) {
+        if (directory_has_data_files(prevDir) && directory_has_data_files(targetDir)) {
+            MessageBoxW(hwnd,
+                L"目标位置已经包含番茄钟数据。为避免覆盖或合并出错，本次切换已取消。\n请先导出目标数据，或选择一个空目录。",
+                L"数据位置冲突", MB_OK | MB_ICONWARNING);
+            return 0;
+        }
+
         int okMain = migrate_data_files(prevDir, targetDir, &migrated, &failed, &expected);
         int okArchive = migrate_archive_logs(prevDir, targetDir, &migrated, &failed, &expected);
         if (!(okMain && okArchive)) {
-            wchar_t warn[256];
-            swprintf(warn, 256, L"数据迁移部分失败：已迁移 %d/%d，失败 %d。", migrated, expected, failed);
-            MessageBoxW(hwnd, warn, L"提示", MB_OK | MB_ICONWARNING);
+            delete_data_files_in_directory(targetDir);
+            MessageBoxW(hwnd,
+                L"数据复制失败，已回滚目标目录；当前数据位置保持不变。",
+                L"迁移失败", MB_OK | MB_ICONERROR);
+            return 0;
         } else {
-            wchar_t okMsg[384];
-            if (expected > 0) {
-                swprintf(okMsg, 384, L"数据位置已切换到:\n%ls\n已迁移 %d/%d 个文件。", targetDir, migrated, expected);
-            } else {
-                swprintf(okMsg, 384, L"数据位置已切换到:\n%ls\n旧位置无可迁移文件。", targetDir);
-            }
-            MessageBoxW(hwnd, okMsg, L"提示", MB_OK | MB_ICONINFORMATION);
+            copiedForSwitch = expected > 0;
         }
     }
 
@@ -726,15 +808,43 @@ static int switch_data_location(HWND hwnd, DataLocationMode mode, const wchar_t*
     }
     wcsncpy(g_data_dir, targetDir, MAX_PATH - 1);
     g_data_dir[MAX_PATH - 1] = L'\0';
+    if (!save_data_location_to_registry()) {
+        g_data_location_mode = prevMode;
+        wcsncpy(g_custom_data_dir, prevCustomDir, MAX_PATH - 1);
+        g_custom_data_dir[MAX_PATH - 1] = L'\0';
+        wcsncpy(g_data_dir, prevDir, MAX_PATH - 1);
+        g_data_dir[MAX_PATH - 1] = L'\0';
+        build_data_file_paths();
+        if (copiedForSwitch) delete_data_files_in_directory(targetDir);
+        MessageBoxW(hwnd, L"无法保存新的数据位置，切换已回滚。", L"切换失败", MB_OK | MB_ICONERROR);
+        return 0;
+    }
     build_data_file_paths();
     repair_settings_recovery_chain();
-    save_data_location_to_registry();
     load_settings();
     pomodoro_count = get_today_count_from_storage();
     refresh_today_count_if_day_changed(hwnd, 1);
     load_heatmap_data();
     if (g_hHeatmapWnd) InvalidateRect(g_hHeatmapWnd, NULL, TRUE);
     refresh_timer_icon_by_state(hwnd);
+    if (_wcsicmp(prevDir, targetDir) != 0) {
+        wchar_t okMsg[384];
+        if (expected > 0) {
+            swprintf(okMsg, 384, L"数据位置已安全切换到:\n%ls\n共迁移 %d/%d 个文件。", targetDir, migrated, expected);
+        } else {
+            swprintf(okMsg, 384, L"数据位置已切换到:\n%ls\n旧位置无可迁移文件。", targetDir);
+        }
+        MessageBoxW(hwnd, okMsg, L"提示", MB_OK | MB_ICONINFORMATION);
+    }
+    if (copiedForSwitch) {
+        if (!delete_data_files_in_directory(prevDir)) {
+            MessageBoxW(hwnd,
+                L"新数据位置已经启用，但部分旧文件无法删除。新位置数据完整，旧文件可稍后手动清理。",
+                L"旧文件未完全清理", MB_OK | MB_ICONWARNING);
+        } else {
+            RemoveDirectoryW(prevDir);
+        }
+    }
     return 1;
 }
 
@@ -845,17 +955,21 @@ static int export_data_to_folder(HWND hwnd) {
 
 static int import_data_from_folder(HWND hwnd) {
     wchar_t inDir[MAX_PATH];
-    wchar_t src[MAX_PATH];
+    wchar_t backupDir[MAX_PATH];
     wchar_t msg[384];
-    WIN32_FIND_DATAW ffd;
-    HANDLE hFind;
-    wchar_t pattern[MAX_PATH];
-    DWORD attr;
-    wchar_t srcArchive[MAX_PATH];
-    wchar_t dstArchive[MAX_PATH];
+    time_t now;
+    struct tm* tmNow;
     int expected = 0;
     int copied = 0;
     int failed = 0;
+    int backupExpected = 0;
+    int backupCopied = 0;
+    int backupFailed = 0;
+    int restoreExpected = 0;
+    int restoreCopied = 0;
+    int restoreFailed = 0;
+    int okMain;
+    int okArchive;
 
     if (is_running || is_paused) {
         MessageBoxW(hwnd, L"计时进行中，无法导入数据。", L"提示", MB_OK | MB_ICONINFORMATION);
@@ -863,78 +977,66 @@ static int import_data_from_folder(HWND hwnd) {
     }
 
     if (!choose_folder_dialog(hwnd, L"选择导入目录", inDir, MAX_PATH)) return 0;
+    if (_wcsicmp(inDir, g_data_dir) == 0) {
+        MessageBoxW(hwnd, L"不能从当前正在使用的数据目录导入。", L"提示", MB_OK | MB_ICONINFORMATION);
+        return 0;
+    }
+    if (!directory_has_data_files(inDir)) {
+        MessageBoxW(hwnd, L"所选目录中没有可导入的番茄钟数据。", L"提示", MB_OK | MB_ICONINFORMATION);
+        return 0;
+    }
+    if (MessageBoxW(hwnd,
+        L"导入会用所选备份替换当前数据。程序会先在当前数据目录创建完整备份；是否继续？",
+        L"确认导入", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return 0;
+    }
+
     ensure_directory_exists(g_data_dir);
-
-    join_path(src, MAX_PATH, inDir, L"pomodoro_settings.json");
-    attr = GetFileAttributesW(src);
-    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        expected++;
-        if (copy_if_exists(src, g_settings_path)) {
-            copied++;
-        } else {
-            failed++;
-        }
+    now = time(NULL);
+    tmNow = localtime(&now);
+    if (tmNow) {
+        swprintf(backupDir, MAX_PATH, L"%ls\\import_backup_%04d%02d%02d_%02d%02d%02d_%lu",
+            g_data_dir, tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday,
+            tmNow->tm_hour, tmNow->tm_min, tmNow->tm_sec, GetCurrentProcessId());
+    } else {
+        swprintf(backupDir, MAX_PATH, L"%ls\\import_backup_%lu", g_data_dir, GetCurrentProcessId());
+    }
+    ensure_directory_exists(backupDir);
+    if (GetFileAttributesW(backupDir) == INVALID_FILE_ATTRIBUTES) {
+        MessageBoxW(hwnd, L"无法创建导入前备份目录，导入已取消。", L"导入失败", MB_OK | MB_ICONERROR);
+        return 0;
     }
 
-    join_path(src, MAX_PATH, inDir, L"pomodoro_settings.json.bak");
-    attr = GetFileAttributesW(src);
-    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        expected++;
-        if (copy_if_exists(src, g_settings_bak_path)) {
-            copied++;
-        } else {
-            failed++;
-        }
+    okMain = migrate_data_files(g_data_dir, backupDir, &backupCopied, &backupFailed, &backupExpected);
+    okArchive = migrate_archive_logs(g_data_dir, backupDir, &backupCopied, &backupFailed, &backupExpected);
+    if (!(okMain && okArchive)) {
+        delete_data_files_in_directory(backupDir);
+        RemoveDirectoryW(backupDir);
+        MessageBoxW(hwnd, L"无法完整备份当前数据，导入已取消；当前数据未改动。", L"导入失败", MB_OK | MB_ICONERROR);
+        return 0;
     }
 
-    join_path(src, MAX_PATH, inDir, L"pomodoro_settings.json.tmp");
-    attr = GetFileAttributesW(src);
-    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        expected++;
-        if (copy_if_exists(src, g_settings_tmp_path)) {
-            copied++;
-        } else {
-            failed++;
-        }
+    if (!delete_data_files_in_directory(g_data_dir)) {
+        delete_data_files_in_directory(g_data_dir);
+        migrate_data_files(backupDir, g_data_dir, &restoreCopied, &restoreFailed, &restoreExpected);
+        migrate_archive_logs(backupDir, g_data_dir, &restoreCopied, &restoreFailed, &restoreExpected);
+        MessageBoxW(hwnd, L"无法清理当前数据，已尝试恢复导入前状态；导入已取消。", L"导入失败", MB_OK | MB_ICONERROR);
+        return 0;
     }
 
-    join_path(src, MAX_PATH, inDir, L"pomodoro_log.csv");
-    attr = GetFileAttributesW(src);
-    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        expected++;
-        if (copy_if_exists(src, g_log_path)) {
-            copied++;
+    okMain = migrate_data_files(inDir, g_data_dir, &copied, &failed, &expected);
+    okArchive = migrate_archive_logs(inDir, g_data_dir, &copied, &failed, &expected);
+    if (!(okMain && okArchive)) {
+        delete_data_files_in_directory(g_data_dir);
+        restoreCopied = restoreFailed = restoreExpected = 0;
+        okMain = migrate_data_files(backupDir, g_data_dir, &restoreCopied, &restoreFailed, &restoreExpected);
+        okArchive = migrate_archive_logs(backupDir, g_data_dir, &restoreCopied, &restoreFailed, &restoreExpected);
+        if (okMain && okArchive) {
+            MessageBoxW(hwnd, L"导入过程中发生错误，当前数据已从自动备份恢复。", L"导入失败", MB_OK | MB_ICONERROR);
         } else {
-            failed++;
+            MessageBoxW(hwnd, L"导入和自动恢复均未完整完成。请保留自动备份目录并手动恢复。", L"严重错误", MB_OK | MB_ICONERROR);
         }
-    }
-
-    join_path(src, MAX_PATH, inDir, L"pomodoro_adjustments.csv");
-    attr = GetFileAttributesW(src);
-    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        expected++;
-        if (copy_if_exists(src, g_adjustments_path)) {
-            copied++;
-        } else {
-            failed++;
-        }
-    }
-
-    swprintf(pattern, MAX_PATH, L"%ls\\pomodoro_log_*.csv", inDir);
-    hFind = FindFirstFileW(pattern, &ffd);
-    if (hFind != INVALID_HANDLE_VALUE) {
-        do {
-            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            swprintf(srcArchive, MAX_PATH, L"%ls\\%ls", inDir, ffd.cFileName);
-            swprintf(dstArchive, MAX_PATH, L"%ls\\%ls", g_data_dir, ffd.cFileName);
-            expected++;
-            if (CopyFileW(srcArchive, dstArchive, FALSE)) {
-                copied++;
-            } else {
-                failed++;
-            }
-        } while (FindNextFileW(hFind, &ffd));
-        FindClose(hFind);
+        return 0;
     }
 
     repair_settings_recovery_chain();
@@ -944,15 +1046,8 @@ static int import_data_from_folder(HWND hwnd) {
     load_heatmap_data();
     if (g_hHeatmapWnd) InvalidateRect(g_hHeatmapWnd, NULL, TRUE);
     refresh_timer_icon_by_state(hwnd);
-    if (expected == 0) {
-        MessageBoxW(hwnd, L"导入完成：未发现可导入的数据文件。", L"提示", MB_OK | MB_ICONINFORMATION);
-    } else if (failed > 0) {
-        swprintf(msg, 384, L"导入完成：成功 %d/%d，失败 %d。", copied, expected, failed);
-        MessageBoxW(hwnd, msg, L"提示", MB_OK | MB_ICONWARNING);
-    } else {
-        swprintf(msg, 384, L"导入完成：成功 %d/%d。", copied, expected);
-        MessageBoxW(hwnd, msg, L"提示", MB_OK | MB_ICONINFORMATION);
-    }
+    swprintf(msg, 384, L"导入完成：成功 %d/%d。\n导入前数据已备份到:\n%ls", copied, expected, backupDir);
+    MessageBoxW(hwnd, msg, L"导入完成", MB_OK | MB_ICONINFORMATION);
     return 1;
 }
 
@@ -1039,13 +1134,26 @@ static void load_archive_logs(void) {
 }
 
 static void reset_defaults_keep_data(void) {
-    settings.pomodoro_duration = 25;
+    settings.long_pomodoro_count = 2;
+    settings.short_pomodoro_duration = 45;
     settings.short_break_duration = 5;
     settings.long_break_duration = 15;
     settings.custom_duration = 10;
+    settings.adjust_block_minutes = 5;
     settings.toast_auto_collapse_seconds = 10;
     settings.enable_clock_sound = 0;
+    settings.enable_completion_sound = 1;
     settings.show_completion_dialog = 1;
+    settings.default_pomodoro_is_long = 1;
+    settings.default_break_is_long = 0;
+
+    if (!is_running && !is_paused) {
+        if (idle_mode == IDLE_POMODORO) {
+            idle_pomodoro_is_long = settings.default_pomodoro_is_long;
+        } else if (idle_mode == IDLE_BREAK) {
+            idle_break_is_long = settings.default_break_is_long;
+        }
+    }
 }
 
 // Initialize system metrics for dialog positioning
@@ -1218,6 +1326,20 @@ void RefreshMenuText(void) {
 // Create dynamic tray icon with text and dots
 HICON create_tray_icon(const wchar_t* text, int dots) {
     int visible_dots = get_visible_dots(dots);
+    HDC hdc = NULL;
+    HDC hdcMask = NULL;
+    HBITMAP hBitmap = NULL;
+    HBITMAP hMask = NULL;
+    HGDIOBJ oldBitmap = NULL;
+    HGDIOBJ oldMaskBitmap = NULL;
+    HGDIOBJ oldFont = NULL;
+    HGDIOBJ oldBrush = NULL;
+    HFONT hFont = NULL;
+    HBRUSH bgBrush = NULL;
+    HBRUSH dotBrush = NULL;
+    HICON hIcon = NULL;
+    void* bits = NULL;
+
     // Return cached icon if nothing has changed
     if (last_icon && wcscmp(text, last_text) == 0 && visible_dots == last_dots) {
         return last_icon;
@@ -1230,7 +1352,9 @@ HICON create_tray_icon(const wchar_t* text, int dots) {
     }
 
     // Create device context and bitmap
-    HDC hdc = CreateCompatibleDC(NULL);
+    hdc = CreateCompatibleDC(NULL);
+    if (!hdc) goto cleanup;
+
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = 32;
@@ -1239,29 +1363,40 @@ HICON create_tray_icon(const wchar_t* text, int dots) {
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
-    void* bits;
-    HBITMAP hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-    SelectObject(hdc, hBitmap);
+    hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!hBitmap || !bits) goto cleanup;
+    oldBitmap = SelectObject(hdc, hBitmap);
+    if (!oldBitmap || oldBitmap == HGDI_ERROR) {
+        oldBitmap = NULL;
+        goto cleanup;
+    }
 
     // Draw background (dark red)
-    HBRUSH bgBrush = CreateSolidBrush(RGB(139, 0, 0));
+    bgBrush = CreateSolidBrush(RGB(139, 0, 0));
+    if (!bgBrush) goto cleanup;
     RECT rect = {0, 0, 32, 32};
     FillRect(hdc, &rect, bgBrush);
     DeleteObject(bgBrush);
+    bgBrush = NULL;
 
     // Set up text rendering
-    HFONT hFont = CreateFontW(
+    hFont = CreateFontW(
         27, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
         DEFAULT_PITCH | FF_SWISS, L"Arial"
     );
-    SelectObject(hdc, hFont);
+    if (!hFont) goto cleanup;
+    oldFont = SelectObject(hdc, hFont);
+    if (!oldFont || oldFont == HGDI_ERROR) {
+        oldFont = NULL;
+        goto cleanup;
+    }
     SetTextColor(hdc, RGB(255, 255, 255));
     SetBkMode(hdc, TRANSPARENT);
 
     // Draw text centered
     SIZE textSize;
-    GetTextExtentPoint32W(hdc, text, wcslen(text), &textSize);
+    GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &textSize);
     int textX = (32 - textSize.cx) / 2;
     int textY = (32 - textSize.cy) / 2 - 2;
     
@@ -1270,23 +1405,35 @@ HICON create_tray_icon(const wchar_t* text, int dots) {
         textX += 2;
     }
     
-    TextOutW(hdc, textX, textY, text, wcslen(text));
+    TextOutW(hdc, textX, textY, text, (int)wcslen(text));
 
     // Draw progress dots (light green)
-    HBRUSH dotBrush = CreateSolidBrush(RGB(144, 238, 144));
+    dotBrush = CreateSolidBrush(RGB(144, 238, 144));
+    if (!dotBrush) goto cleanup;
+    oldBrush = SelectObject(hdc, dotBrush);
+    if (!oldBrush || oldBrush == HGDI_ERROR) {
+        oldBrush = NULL;
+        goto cleanup;
+    }
     for (int i = 0; i < visible_dots; i++) {
         int dotX = 4 + i * 8;
         int dotY = 30;
         Ellipse(hdc, dotX - 3, dotY - 3, dotX + 3, dotY + 3);
     }
+    SelectObject(hdc, oldBrush);
+    oldBrush = NULL;
     DeleteObject(dotBrush);
-
-    DeleteObject(hFont);
+    dotBrush = NULL;
 
     // Create icon mask
-    HBITMAP hMask = CreateCompatibleBitmap(hdc, 32, 32);
-    HDC hdcMask = CreateCompatibleDC(hdc);
-    SelectObject(hdcMask, hMask);
+    hMask = CreateCompatibleBitmap(hdc, 32, 32);
+    hdcMask = CreateCompatibleDC(hdc);
+    if (!hMask || !hdcMask) goto cleanup;
+    oldMaskBitmap = SelectObject(hdcMask, hMask);
+    if (!oldMaskBitmap || oldMaskBitmap == HGDI_ERROR) {
+        oldMaskBitmap = NULL;
+        goto cleanup;
+    }
     SetBkColor(hdc, RGB(139, 0, 0));
     BitBlt(hdcMask, 0, 0, 32, 32, hdc, 0, 0, SRCCOPY);
 
@@ -1295,13 +1442,24 @@ HICON create_tray_icon(const wchar_t* text, int dots) {
     iconInfo.fIcon = TRUE;
     iconInfo.hbmColor = hBitmap;
     iconInfo.hbmMask = hMask;
-    HICON hIcon = CreateIconIndirect(&iconInfo);
+    hIcon = CreateIconIndirect(&iconInfo);
 
-    // Clean up
-    DeleteDC(hdcMask);
-    DeleteDC(hdc);
-    DeleteObject(hBitmap);
-    DeleteObject(hMask);
+cleanup:
+    if (oldBrush && hdc) SelectObject(hdc, oldBrush);
+    if (oldFont && hdc) SelectObject(hdc, oldFont);
+    if (oldMaskBitmap && hdcMask) SelectObject(hdcMask, oldMaskBitmap);
+    if (oldBitmap && hdc) SelectObject(hdc, oldBitmap);
+    if (dotBrush) DeleteObject(dotBrush);
+    if (bgBrush) DeleteObject(bgBrush);
+    if (hFont) DeleteObject(hFont);
+    if (hdcMask) DeleteDC(hdcMask);
+    if (hdc) DeleteDC(hdc);
+    if (hBitmap) DeleteObject(hBitmap);
+    if (hMask) DeleteObject(hMask);
+
+    if (!hIcon) {
+        hIcon = CopyIcon(LoadIconW(NULL, IDI_APPLICATION));
+    }
 
     // Cache for later
     last_icon = hIcon;
@@ -1314,18 +1472,19 @@ HICON create_tray_icon(const wchar_t* text, int dots) {
 // Update system tray icon and tooltip
 void update_tray_icon(HWND hwnd, const wchar_t* text, int dots, int seconds) {
     wchar_t tooltip[128];
+    (void)hwnd;
     if (seconds > 0) {
         int min = seconds / 60, sec = seconds % 60;
         swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"%02d:%02d", min, sec);
     } else {
         if (idle_mode == IDLE_BREAK) {
-            wcsncpy(tooltip, g_lang->tooltip_break, sizeof(tooltip)/sizeof(tooltip[0]) - 1);
+            wcsncpy(tooltip, idle_break_is_long ? L"点击开始长休息" : L"点击开始短休息", sizeof(tooltip)/sizeof(tooltip[0]) - 1);
             tooltip[sizeof(tooltip)/sizeof(tooltip[0]) - 1] = L'\0';
         } else if (idle_mode == IDLE_CUSTOM) {
             wcsncpy(tooltip, L"点击开始自定义计时", sizeof(tooltip)/sizeof(tooltip[0]) - 1);
             tooltip[sizeof(tooltip)/sizeof(tooltip[0]) - 1] = L'\0';
         } else {
-            wcsncpy(tooltip, g_lang->tooltip_pomodoro, sizeof(tooltip)/sizeof(tooltip[0]) - 1);
+            wcsncpy(tooltip, idle_pomodoro_is_long ? L"点击开始长番茄钟" : L"点击开始短番茄钟", sizeof(tooltip)/sizeof(tooltip[0]) - 1);
             tooltip[sizeof(tooltip)/sizeof(tooltip[0]) - 1] = L'\0';
         }
     }
@@ -1380,18 +1539,42 @@ static void stop_timer_thread_if_needed(void) {
     }
 }
 
-static void sync_idle_break_type_with_count(void) {
-    if (idle_mode == IDLE_BREAK) {
-        idle_break_is_long = ((pomodoro_count % 4) == 0 && pomodoro_count > 0) ? 1 : 0;
-    }
+static int launch_timer_thread(HWND hwnd) {
+    timer_thread_handle = CreateThread(NULL, 0, timer_thread, hwnd, 0, NULL);
+    if (timer_thread_handle) return 1;
+
+    is_running = 0;
+    is_paused = 0;
+    remaining_seconds = 0;
+    current_timer_mode = TIMER_NONE;
+    stop_clock_loop_sound();
+    MessageBoxW(hwnd, L"无法创建计时线程，计时未启动。", L"启动失败", MB_OK | MB_ICONERROR);
+    return 0;
+}
+
+static int is_pomodoro_mode(TimerMode mode) {
+    return mode == TIMER_LONG_POMODORO || mode == TIMER_SHORT_POMODORO;
+}
+
+static int get_long_pomodoro_duration(void) {
+    return clamp_int(settings.short_pomodoro_duration * settings.long_pomodoro_count, 1, 720);
+}
+
+static TimerMode get_default_pomodoro_mode(void) {
+    return settings.default_pomodoro_is_long ? TIMER_LONG_POMODORO : TIMER_SHORT_POMODORO;
+}
+
+static TimerMode get_default_break_mode(void) {
+    return settings.default_break_is_long ? TIMER_LONG_BREAK : TIMER_SHORT_BREAK;
 }
 
 static void set_idle_mode_after_manual_stop(void) {
-    if (current_timer_mode == TIMER_POMODORO) {
+    if (is_pomodoro_mode(current_timer_mode)) {
         idle_mode = IDLE_BREAK;
-        sync_idle_break_type_with_count();
+        idle_break_is_long = settings.default_break_is_long;
     } else if (current_timer_mode == TIMER_SHORT_BREAK || current_timer_mode == TIMER_LONG_BREAK) {
         idle_mode = IDLE_POMODORO;
+        idle_pomodoro_is_long = settings.default_pomodoro_is_long;
         idle_break_is_long = 0;
     } else if (current_timer_mode == TIMER_CUSTOM) {
         idle_mode = IDLE_CUSTOM;
@@ -1420,9 +1603,14 @@ static void start_mode_from_menu(HWND hwnd, TimerMode mode) {
         remaining_seconds = 0;
     }
 
-    if (mode == TIMER_POMODORO) {
+    if (mode == TIMER_LONG_POMODORO) {
         idle_mode = IDLE_POMODORO;
-        start_timer(hwnd, settings.pomodoro_duration, TIMER_POMODORO);
+        idle_pomodoro_is_long = 1;
+        start_timer(hwnd, get_long_pomodoro_duration(), TIMER_LONG_POMODORO);
+    } else if (mode == TIMER_SHORT_POMODORO) {
+        idle_mode = IDLE_POMODORO;
+        idle_pomodoro_is_long = 0;
+        start_timer(hwnd, settings.short_pomodoro_duration, TIMER_SHORT_POMODORO);
     } else if (mode == TIMER_SHORT_BREAK) {
         idle_mode = IDLE_BREAK;
         idle_break_is_long = 0;
@@ -1450,7 +1638,7 @@ static void start_current_idle_mode(HWND hwnd) {
     } else if (idle_mode == IDLE_CUSTOM) {
         start_mode_from_menu(hwnd, TIMER_CUSTOM);
     } else {
-        start_mode_from_menu(hwnd, TIMER_POMODORO);
+        start_mode_from_menu(hwnd, idle_pomodoro_is_long ? TIMER_LONG_POMODORO : TIMER_SHORT_POMODORO);
     }
 }
 
@@ -1466,12 +1654,12 @@ void play_resource_sound(const char* resourceName) {
 DWORD WINAPI timer_thread(LPVOID lpParam) {
     start_clock_loop_sound();
 
-    ULONGLONG last_tick = GetTickCount();
+    ULONGLONG last_tick = GetTickCount64();
     int last_shown_seconds = -1;
     HWND hwnd = (HWND)lpParam;
 
     while (is_running) {
-        ULONGLONG now = GetTickCount();
+        ULONGLONG now = GetTickCount64();
         ULONGLONG elapsed_ms = now - last_tick;
 
         if (elapsed_ms >= 1000) {
@@ -1505,7 +1693,7 @@ DWORD WINAPI timer_thread(LPVOID lpParam) {
 
             int completed_mode = (int)current_timer_mode;
 
-            if (current_timer_mode == TIMER_POMODORO) {
+            if (is_pomodoro_mode(current_timer_mode)) {
                 if (record_completed_pomodoro()) {
                     pomodoro_count = get_today_count_from_storage();
                 } else {
@@ -1516,11 +1704,12 @@ DWORD WINAPI timer_thread(LPVOID lpParam) {
                 }
             }
 
-            if (current_timer_mode == TIMER_POMODORO) {
+            if (is_pomodoro_mode(current_timer_mode)) {
                 idle_mode = IDLE_BREAK;
-                idle_break_is_long = ((pomodoro_count % 4) == 0 && pomodoro_count > 0) ? 1 : 0;
+                idle_break_is_long = settings.default_break_is_long;
             } else if (current_timer_mode == TIMER_SHORT_BREAK || current_timer_mode == TIMER_LONG_BREAK) {
                 idle_mode = IDLE_POMODORO;
+                idle_pomodoro_is_long = settings.default_pomodoro_is_long;
                 idle_break_is_long = 0;
             } else if (current_timer_mode == TIMER_CUSTOM) {
                 idle_mode = IDLE_CUSTOM;
@@ -1543,7 +1732,7 @@ DWORD WINAPI timer_thread(LPVOID lpParam) {
         }
 
         ULONGLONG next_boundary = last_tick + 1000;
-        now = GetTickCount();
+        now = GetTickCount64();
         long sleep_ms = (long)(next_boundary - now);
 
         if (sleep_ms < 1) sleep_ms = 1;
@@ -1565,15 +1754,15 @@ void start_timer(HWND hwnd, int duration_minutes, TimerMode mode) {
     is_running = 1;
     is_paused = 0;
     current_timer_mode = mode;
-    timer_thread_handle = CreateThread(NULL, 0, timer_thread, hwnd, 0, NULL);
+    launch_timer_thread(hwnd);
 }
 
 // Check if autostart is enabled in registry
 int is_autostart_enabled() {
     HKEY hKey;
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
         DWORD type;
-        if (RegQueryValueExA(hKey, "PomodoroTimer", NULL, &type, NULL, NULL) == ERROR_SUCCESS) {
+        if (RegQueryValueExW(hKey, L"PomodoroTimer", NULL, &type, NULL, NULL) == ERROR_SUCCESS) {
             RegCloseKey(hKey);
             return 1;
         }
@@ -1583,18 +1772,28 @@ int is_autostart_enabled() {
 }
 
 // Enable or disable autostart in registry
-void set_autostart(int enable) {
+int set_autostart(int enable) {
     HKEY hKey;
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+    LONG result;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, NULL, 0, KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
         if (enable) {
-            char path[MAX_PATH];
-            GetModuleFileNameA(NULL, path, MAX_PATH);
-            RegSetValueExA(hKey, "PomodoroTimer", 0, REG_SZ, (BYTE*)path, strlen(path) + 1);
+            wchar_t path[MAX_PATH];
+            wchar_t command[MAX_PATH + 3];
+            if (!GetModuleFileNameW(NULL, path, MAX_PATH)) {
+                RegCloseKey(hKey);
+                return 0;
+            }
+            swprintf(command, MAX_PATH + 3, L"\"%ls\"", path);
+            result = RegSetValueExW(hKey, L"PomodoroTimer", 0, REG_SZ,
+                (const BYTE*)command, (DWORD)((wcslen(command) + 1) * sizeof(wchar_t)));
         } else {
-            RegDeleteValueA(hKey, "PomodoroTimer");
+            result = RegDeleteValueW(hKey, L"PomodoroTimer");
+            if (result == ERROR_FILE_NOT_FOUND) result = ERROR_SUCCESS;
         }
         RegCloseKey(hKey);
+        return result == ERROR_SUCCESS;
     }
+    return 0;
 }
 
 // Show settings dialog
@@ -1607,12 +1806,14 @@ void ShowSettingsDialog(HWND hwndParent) {
 
 // Settings dialog procedure
 INT_PTR CALLBACK SettingsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    (void)lParam;
     switch (uMsg) {
         case WM_INITDIALOG: {
             // Set dialog title localized
             SetWindowTextW(hwndDlg, g_lang->settings_title);
             // Set label texts (assume label IDs: 201, 202, 203)
-            SetDlgItemTextW(hwndDlg, 201, g_lang->settings_pomodoro);
+            SetDlgItemTextW(hwndDlg, 201, L"长番茄钟包含番茄钟数量:");
+            SetDlgItemTextW(hwndDlg, IDC_LABEL_SHORT_POMODORO, L"短番茄钟时长(分钟):");
             SetDlgItemTextW(hwndDlg, 202, g_lang->settings_short_break);
             SetDlgItemTextW(hwndDlg, 203, g_lang->settings_long_break);
             SetDlgItemTextW(hwndDlg, IDC_LABEL_CUSTOM, L"自定义计时时长(分钟):");
@@ -1623,8 +1824,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM 
 
             // Set edit values
             char buf[16];
-            snprintf(buf, sizeof(buf), "%d", settings.pomodoro_duration);
+            snprintf(buf, sizeof(buf), "%d", settings.long_pomodoro_count);
             SetDlgItemTextA(hwndDlg, IDC_POMODORO, buf);
+            snprintf(buf, sizeof(buf), "%d", settings.short_pomodoro_duration);
+            SetDlgItemTextA(hwndDlg, IDC_SHORT_POMODORO, buf);
             snprintf(buf, sizeof(buf), "%d", settings.short_break_duration);
             SetDlgItemTextA(hwndDlg, IDC_SHORT_BREAK, buf);
             snprintf(buf, sizeof(buf), "%d", settings.long_break_duration);
@@ -1633,6 +1836,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM 
             SetDlgItemTextA(hwndDlg, IDC_CUSTOM_TIMER, buf);
             SendDlgItemMessageA(hwndDlg, IDC_CLOCK_SOUND, BM_SETCHECK, settings.enable_clock_sound ? BST_CHECKED : BST_UNCHECKED, 0);
             SendDlgItemMessageA(hwndDlg, IDC_AUTOSTART, BM_SETCHECK, autostart_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+            CheckRadioButton(hwndDlg, IDC_DEFAULT_LONG_POMODORO, IDC_DEFAULT_SHORT_POMODORO,
+                settings.default_pomodoro_is_long ? IDC_DEFAULT_LONG_POMODORO : IDC_DEFAULT_SHORT_POMODORO);
+            CheckRadioButton(hwndDlg, IDC_DEFAULT_SHORT_BREAK, IDC_DEFAULT_LONG_BREAK,
+                settings.default_break_is_long ? IDC_DEFAULT_LONG_BREAK : IDC_DEFAULT_SHORT_BREAK);
 
             center_window_on_work_area(hwndDlg);
             return TRUE;
@@ -1642,9 +1849,11 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM 
                 case IDC_OK: {
                     // Save settings from dialog
                     char buf[16];
-                    int pomodoro, short_break, long_break, custom_timer;
+                    int long_pomodoro_count, short_pomodoro, short_break, long_break, custom_timer;
                     GetDlgItemTextA(hwndDlg, IDC_POMODORO, buf, sizeof(buf));
-                    pomodoro = atoi(buf);
+                    long_pomodoro_count = atoi(buf);
+                    GetDlgItemTextA(hwndDlg, IDC_SHORT_POMODORO, buf, sizeof(buf));
+                    short_pomodoro = atoi(buf);
                     GetDlgItemTextA(hwndDlg, IDC_SHORT_BREAK, buf, sizeof(buf));
                     short_break = atoi(buf);
                     GetDlgItemTextA(hwndDlg, IDC_LONG_BREAK, buf, sizeof(buf));
@@ -1653,18 +1862,36 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM 
                     custom_timer = atoi(buf);
                     
                     // Validate values
-                    if (pomodoro > 0 && pomodoro <= 120 && 
+                    if (long_pomodoro_count > 0 && long_pomodoro_count <= 12 &&
+                        short_pomodoro > 0 && short_pomodoro <= 720 &&
+                        short_pomodoro * long_pomodoro_count <= 720 &&
                         short_break > 0 && short_break <= 60 && 
                         long_break > 0 && long_break <= 120 &&
                         custom_timer > 0 && custom_timer <= 720) {
                         
-                        settings.pomodoro_duration = pomodoro;
+                        settings.long_pomodoro_count = long_pomodoro_count;
+                        settings.short_pomodoro_duration = short_pomodoro;
                         settings.short_break_duration = short_break;
                         settings.long_break_duration = long_break;
                         settings.custom_duration = custom_timer;
                         settings.enable_clock_sound = SendDlgItemMessageA(hwndDlg, IDC_CLOCK_SOUND, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                        autostart_enabled = SendDlgItemMessageA(hwndDlg, IDC_AUTOSTART, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                        set_autostart(autostart_enabled);
+                        settings.default_pomodoro_is_long = IsDlgButtonChecked(hwndDlg, IDC_DEFAULT_LONG_POMODORO) == BST_CHECKED;
+                        settings.default_break_is_long = IsDlgButtonChecked(hwndDlg, IDC_DEFAULT_LONG_BREAK) == BST_CHECKED;
+                        if (!is_running && !is_paused) {
+                            if (idle_mode == IDLE_POMODORO) {
+                                idle_pomodoro_is_long = settings.default_pomodoro_is_long;
+                            } else if (idle_mode == IDLE_BREAK) {
+                                idle_break_is_long = settings.default_break_is_long;
+                            }
+                        }
+                        {
+                            int requestedAutostart = SendDlgItemMessageA(hwndDlg, IDC_AUTOSTART, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                            if (set_autostart(requestedAutostart)) {
+                                autostart_enabled = requestedAutostart;
+                            } else {
+                                MessageBoxW(hwndDlg, L"开机启动设置失败。", L"错误", MB_OK | MB_ICONERROR);
+                            }
+                        }
                         save_settings();
                         EndDialog(hwndDlg, IDOK);
                     } else {
@@ -1700,7 +1927,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.4.0");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.1");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -1782,20 +2009,17 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_COMMAND:
             if (LOWORD(wParam) == ID_TOAST_ACTION && HIWORD(wParam) == BN_CLICKED) {
                 // Button clicked: start the appropriate timer on the main window
-                if (toast_completed_mode == TIMER_POMODORO) {
-                    if ((pomodoro_count % 4) == 0 && pomodoro_count > 0) {
-                        idle_mode = IDLE_BREAK;
-                        start_timer(g_main_hwnd, settings.long_break_duration, TIMER_LONG_BREAK);
-                    } else {
-                        idle_mode = IDLE_BREAK;
-                        start_timer(g_main_hwnd, settings.short_break_duration, TIMER_SHORT_BREAK);
-                    }
+                if (is_pomodoro_mode((TimerMode)toast_completed_mode)) {
+                    idle_mode = IDLE_BREAK;
+                    idle_break_is_long = settings.default_break_is_long;
+                    start_mode_from_menu(g_main_hwnd, get_default_break_mode());
                 } else if (toast_completed_mode == TIMER_CUSTOM) {
                     idle_mode = IDLE_CUSTOM;
-                    start_timer(g_main_hwnd, settings.custom_duration, TIMER_CUSTOM);
+                    start_mode_from_menu(g_main_hwnd, TIMER_CUSTOM);
                 } else {
                     idle_mode = IDLE_POMODORO;
-                    start_timer(g_main_hwnd, settings.pomodoro_duration, TIMER_POMODORO);
+                    idle_pomodoro_is_long = settings.default_pomodoro_is_long;
+                    start_mode_from_menu(g_main_hwnd, get_default_pomodoro_mode());
                 }
                  DestroyWindow(hwnd);
              } else if (LOWORD(wParam) == ID_TOAST_CLOSE && HIWORD(wParam) == BN_CLICKED) {
@@ -1817,7 +2041,7 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                      closeX = expandedWidth - 22 - 8;
                      if (g_hToastCloseButton) SetWindowPos(g_hToastCloseButton, NULL, closeX, 8, 22, 22, SWP_NOZORDER | SWP_SHOWWINDOW);
                      if (g_hToastCollapseButton) SetWindowPos(g_hToastCollapseButton, NULL, closeX - 26, 8, 22, 22, SWP_NOZORDER | SWP_SHOWWINDOW);
-                     SetWindowTextW(g_hToastCollapseButton, L"_");
+                     if (g_hToastCollapseButton) SetWindowTextW(g_hToastCollapseButton, L"_");
                  } else {
                      GetWindowRect(hwnd, &g_toast_expanded_rect);
                      g_toast_collapsed = 1;
@@ -1830,7 +2054,7 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                          g_toast_expanded_rect.bottom - g_toast_expanded_rect.top,
                          SWP_SHOWWINDOW);
                      if (g_hToastCollapseButton) SetWindowPos(g_hToastCollapseButton, NULL, 9, 8, 22, 22, SWP_NOZORDER | SWP_SHOWWINDOW);
-                     SetWindowTextW(g_hToastCollapseButton, L">");
+                     if (g_hToastCollapseButton) SetWindowTextW(g_hToastCollapseButton, L">");
                  }
                  InvalidateRect(hwnd, NULL, TRUE);
              }
@@ -1982,8 +2206,9 @@ void RegisterToastWindowClass(void) {
 // Show completion notification as toast
 void ShowCompletionNotification(HWND hwnd, int completed_mode) {
     const wchar_t* message;
+    (void)hwnd;
 
-    if (completed_mode == TIMER_POMODORO) {
+    if (is_pomodoro_mode((TimerMode)completed_mode)) {
         message = g_lang->notify_pomodoro_complete;
     } else if (completed_mode == TIMER_LONG_BREAK) {
         message = g_lang->notify_long_break_complete;
@@ -2012,22 +2237,22 @@ void ShowCompletionNotification(HWND hwnd, int completed_mode) {
     // Calculate toast position (above taskbar, right side)
     int toastWidth = 300; // smaller width
     int toastHeight = 150; // smaller height to match button
-    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    int toastScreenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int toastScreenHeight = GetSystemMetrics(SM_CYSCREEN);
 
-    int xPos = screenWidth - toastWidth;  // stick to primary screen right edge
+    int xPos = toastScreenWidth - toastWidth;  // stick to primary screen right edge
     int yPos = taskbarRect.top - toastHeight;  // flush to taskbar top
 
     // Fallback if taskbar position not found
     if (yPos < 0) {
-        yPos = screenHeight - toastHeight;
+        yPos = toastScreenHeight - toastHeight;
     }
 
     // Keep toast within visible screen on small displays / unusual taskbar layouts.
     if (xPos < 0) xPos = 0;
     if (yPos < 0) yPos = 0;
-    if (xPos + toastWidth > screenWidth) xPos = screenWidth - toastWidth;
-    if (yPos + toastHeight > screenHeight) yPos = screenHeight - toastHeight;
+    if (xPos + toastWidth > toastScreenWidth) xPos = toastScreenWidth - toastWidth;
+    if (yPos + toastHeight > toastScreenHeight) yPos = toastScreenHeight - toastHeight;
     if (xPos < 0) xPos = 0;
     if (yPos < 0) yPos = 0;
 
@@ -2048,7 +2273,7 @@ void ShowCompletionNotification(HWND hwnd, int completed_mode) {
     if (g_hToastWnd) {
         g_toast_collapsed = 0;
         // store toast state
-        toast_is_pomodoro = (completed_mode == TIMER_POMODORO);
+        toast_is_pomodoro = is_pomodoro_mode((TimerMode)completed_mode);
         toast_is_long_break = (completed_mode == TIMER_LONG_BREAK);
         toast_completed_mode = completed_mode;
 
@@ -2060,13 +2285,13 @@ void ShowCompletionNotification(HWND hwnd, int completed_mode) {
         int btnX = (toastWidth - btnW) / 2;
         int btnY = toastHeight - btnH - 15;
         const wchar_t* btnText;
-        if (completed_mode == TIMER_POMODORO) {
-            btnText = g_lang->menu_start_break;
+        if (is_pomodoro_mode((TimerMode)completed_mode)) {
+            btnText = settings.default_break_is_long ? L"开始长休息" : L"开始短休息";
         } else if (completed_mode == TIMER_CUSTOM) {
             btnText = L"继续自定义"
             ;
         } else {
-            btnText = g_lang->menu_start_pomodoro;
+            btnText = settings.default_pomodoro_is_long ? L"开始长番茄钟" : L"开始短番茄钟";
         }
         g_hToastButton = CreateWindowW(L"BUTTON", btnText,
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -2292,7 +2517,6 @@ static void refresh_today_count_if_day_changed(HWND hwnd, int forceRefresh) {
     newCount = get_today_count_from_storage();
     if (newCount != pomodoro_count) {
         pomodoro_count = newCount;
-        sync_idle_break_type_with_count();
         save_settings();
         if (g_hHeatmapWnd) InvalidateRect(g_hHeatmapWnd, NULL, TRUE);
         if (hwnd && nid.hWnd) {
@@ -2307,7 +2531,6 @@ static void load_heatmap_data(void) {
     time_t now = time(NULL);
     struct tm* tmNow = localtime(&now);
     char line[128];
-    int idx;
     int i;
 
     g_day_count = 0;
@@ -2626,7 +2849,7 @@ void ShowHeatmapWindow(HWND hwnd) {
 
     if (!g_hHeatmapWnd) {
         MessageBoxW(NULL, L"热力图窗口创建失败。", L"错误", MB_OK | MB_ICONERROR);
-                sync_idle_break_type_with_count();
+        return;
     }
 
     ShowWindow(g_hHeatmapWnd, SW_SHOW);
@@ -2639,6 +2862,12 @@ void generate_and_open_report(HWND hwnd) {
 
 // Main window procedure
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (g_taskbar_created_message && msg == g_taskbar_created_message) {
+        Shell_NotifyIconW(NIM_ADD, &nid);
+        refresh_timer_icon_by_state(hwnd);
+        return 0;
+    }
+
     switch (msg) {
         case WM_CREATE:
             SetTimer(hwnd, ID_MAIN_DAY_SYNC_TIMER, 30000, NULL);
@@ -2650,7 +2879,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (remaining_seconds > 0 && current_timer_mode != TIMER_NONE) {
                         is_paused = 0;
                         is_running = 1;
-                        timer_thread_handle = CreateThread(NULL, 0, timer_thread, hwnd, 0, NULL);
+                        launch_timer_thread(hwnd);
                     } else {
                         // Broken pause state fallback: clear pause and return to idle safely.
                         is_paused = 0;
@@ -2668,17 +2897,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     save_settings();
                     refresh_timer_icon_by_state(hwnd);
                 } else {
-                    if (idle_mode == IDLE_BREAK) {
-                        if (idle_break_is_long) {
-                            start_timer(hwnd, settings.long_break_duration, TIMER_LONG_BREAK);
-                        } else {
-                            start_timer(hwnd, settings.short_break_duration, TIMER_SHORT_BREAK);
-                        }
-                    } else if (idle_mode == IDLE_CUSTOM) {
-                        start_timer(hwnd, settings.custom_duration, TIMER_CUSTOM);
-                    } else {
-                        start_timer(hwnd, settings.pomodoro_duration, TIMER_POMODORO);
-                    }
+                    start_current_idle_mode(hwnd);
                 }
             } else if (LOWORD(lParam) == WM_RBUTTONUP) {
                 // Right click: show context menu
@@ -2691,6 +2910,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 HMENU hDataOpsMenu = CreatePopupMenu();
                 HMENU hDataStoreMenu = CreatePopupMenu();
                 HMENU hIdleMenu = CreatePopupMenu();
+                UINT idleAvailability = (is_running || is_paused) ? MF_GRAYED : MF_ENABLED;
                 g_hMenu = hMenu; // Store menu handle for language updates
 
                 AppendMenu(hControlMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_START_CURRENT, L"开始");
@@ -2698,7 +2918,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     is_running ? L"暂停" : L"继续");
                 AppendMenu(hControlMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_STOP, L"结束");
 
-                AppendMenu(hStartMenu, MF_STRING, 1, L"开始番茄钟");
+                AppendMenu(hStartMenu, MF_STRING, 1, L"开始长番茄钟");
+                AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_SHORT_POMODORO, L"开始短番茄钟");
                 AppendMenu(hStartMenu, MF_STRING, 2, L"开始短休息");
                 AppendMenu(hStartMenu, MF_STRING, 3, L"开始长休息");
                 AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_CUSTOM, L"开始自定义计时");
@@ -2709,7 +2930,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_SET_COUNT, L"修改今日番茄数");
                 AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_RESET_COUNT, L"番茄计数清零");
 
-                AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_POMODORO_DURATION, L"番茄时长(分钟)");
+                AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_POMODORO_DURATION, L"长番茄钟包含番茄钟数量");
+                AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_SHORT_POMODORO_DURATION, L"短番茄钟时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_SHORT_BREAK_DURATION, L"短休息时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_LONG_BREAK_DURATION, L"长休息时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_CUSTOM_DURATION, L"自定义时长(分钟)");
@@ -2720,6 +2942,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hOptionMenu, MF_STRING | (settings.enable_completion_sound ? MF_CHECKED : 0), ID_MENU_COMPLETION_SOUND, L"完成声音");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.show_completion_dialog ? MF_CHECKED : 0), 9, L"完成后弹窗");
                 AppendMenu(hOptionMenu, MF_STRING | (autostart_enabled ? MF_CHECKED : 0), 5, L"开机启动");
+                AppendMenu(hOptionMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenu(hOptionMenu, MF_STRING | (settings.default_pomodoro_is_long ? MF_CHECKED : 0), ID_MENU_DEFAULT_LONG_POMODORO, L"默认：长番茄钟");
+                AppendMenu(hOptionMenu, MF_STRING | (!settings.default_pomodoro_is_long ? MF_CHECKED : 0), ID_MENU_DEFAULT_SHORT_POMODORO, L"默认：短番茄钟");
+                AppendMenu(hOptionMenu, MF_STRING | (!settings.default_break_is_long ? MF_CHECKED : 0), ID_MENU_DEFAULT_SHORT_BREAK, L"默认：短休息");
+                AppendMenu(hOptionMenu, MF_STRING | (settings.default_break_is_long ? MF_CHECKED : 0), ID_MENU_DEFAULT_LONG_BREAK, L"默认：长休息");
 
                 AppendMenu(hDataOpsMenu, MF_STRING, ID_MENU_IMPORT_DATA, L"导入数据");
                 AppendMenu(hDataOpsMenu, MF_STRING, ID_MENU_EXPORT_DATA, L"导出数据");
@@ -2729,10 +2956,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hDataStoreMenu, MF_STRING | (g_data_location_mode == DATA_LOC_ONEDRIVE ? MF_CHECKED : 0), ID_MENU_DATA_LOC_ONEDRIVE, L"OneDrive");
                 AppendMenu(hDataStoreMenu, MF_STRING | (g_data_location_mode == DATA_LOC_CUSTOM ? MF_CHECKED : 0), ID_MENU_DATA_LOC_CUSTOM, L"自定义位置");
 
-                    AppendMenu(hIdleMenu, MF_STRING | ((!is_running && !is_paused && idle_mode == IDLE_POMODORO) ? MF_CHECKED : 0), ID_MENU_IDLE_POMODORO, L"番茄钟");
-                    AppendMenu(hIdleMenu, MF_STRING | ((!is_running && !is_paused && idle_mode == IDLE_BREAK && !idle_break_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_SHORT_BREAK, L"短休息");
-                    AppendMenu(hIdleMenu, MF_STRING | ((!is_running && !is_paused && idle_mode == IDLE_BREAK && idle_break_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_LONG_BREAK, L"长休息");
-                    AppendMenu(hIdleMenu, MF_STRING | ((!is_running && !is_paused && idle_mode == IDLE_CUSTOM) ? MF_CHECKED : 0), ID_MENU_IDLE_CUSTOM, L"自定义计时");
+                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_POMODORO && idle_pomodoro_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_POMODORO, L"长番茄钟");
+                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_POMODORO && !idle_pomodoro_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_SHORT_POMODORO, L"短番茄钟");
+                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_BREAK && !idle_break_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_SHORT_BREAK, L"短休息");
+                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_BREAK && idle_break_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_LONG_BREAK, L"长休息");
+                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_CUSTOM) ? MF_CHECKED : 0), ID_MENU_IDLE_CUSTOM, L"自定义计时");
 
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hControlMenu, L"会话");
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hStartMenu, L"切换");
@@ -2765,7 +2993,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         } else if (is_paused && remaining_seconds > 0 && current_timer_mode != TIMER_NONE) {
                             is_paused = 0;
                             is_running = 1;
-                            timer_thread_handle = CreateThread(NULL, 0, timer_thread, hwnd, 0, NULL);
+                            launch_timer_thread(hwnd);
                             refresh_timer_icon_by_state(hwnd);
                         } else {
                             MessageBoxW(hwnd, L"当前没有可暂停或继续的计时。", L"提示", MB_OK | MB_ICONINFORMATION);
@@ -2782,8 +3010,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             refresh_timer_icon_by_state(hwnd);
                         }
                         break;
-                    case 1: // Start Pomodoro
-                        start_mode_from_menu(hwnd, TIMER_POMODORO);
+                    case 1: // Start long Pomodoro
+                        start_mode_from_menu(hwnd, TIMER_LONG_POMODORO);
+                        break;
+                    case ID_MENU_START_SHORT_POMODORO:
+                        start_mode_from_menu(hwnd, TIMER_SHORT_POMODORO);
                         break;
                     case 2: // Start Break
                         start_mode_from_menu(hwnd, TIMER_SHORT_BREAK);
@@ -2808,17 +3039,52 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         save_settings();
                         break;
                     case 5: // Toggle Autostart
-                        autostart_enabled = !autostart_enabled;
-                        set_autostart(autostart_enabled);
+                        if (set_autostart(!autostart_enabled)) {
+                            autostart_enabled = !autostart_enabled;
+                        } else {
+                            MessageBoxW(hwnd, L"开机启动设置失败。", L"错误", MB_OK | MB_ICONERROR);
+                        }
                         break;
                     case 9: // Toggle Completion Dialog
                         settings.show_completion_dialog = !settings.show_completion_dialog;
                         save_settings();
                         break;
+                    case ID_MENU_DEFAULT_LONG_POMODORO:
+                    case ID_MENU_DEFAULT_SHORT_POMODORO:
+                        settings.default_pomodoro_is_long = (cmd == ID_MENU_DEFAULT_LONG_POMODORO);
+                        if (!is_running && !is_paused && idle_mode == IDLE_POMODORO) {
+                            idle_pomodoro_is_long = settings.default_pomodoro_is_long;
+                            refresh_timer_icon_by_state(hwnd);
+                        }
+                        save_settings();
+                        break;
+                    case ID_MENU_DEFAULT_LONG_BREAK:
+                    case ID_MENU_DEFAULT_SHORT_BREAK:
+                        settings.default_break_is_long = (cmd == ID_MENU_DEFAULT_LONG_BREAK);
+                        if (!is_running && !is_paused && idle_mode == IDLE_BREAK) {
+                            idle_break_is_long = settings.default_break_is_long;
+                            refresh_timer_icon_by_state(hwnd);
+                        }
+                        save_settings();
+                        break;
                     case ID_MENU_SET_POMODORO_DURATION: {
-                        int minutes = settings.pomodoro_duration;
-                        if (PromptForInteger(hwnd, L"番茄时长", L"请输入番茄时长(1-120分钟):", minutes, 1, 120, &minutes)) {
-                            settings.pomodoro_duration = minutes;
+                        int count = settings.long_pomodoro_count;
+                        int maxCount = 720 / settings.short_pomodoro_duration;
+                        wchar_t countPrompt[128];
+                        if (maxCount > 12) maxCount = 12;
+                        if (maxCount < 1) maxCount = 1;
+                        swprintf(countPrompt, 128, L"请输入长番茄钟等于几个番茄钟(1-%d):", maxCount);
+                        if (PromptForInteger(hwnd, L"长番茄钟数量", countPrompt, count, 1, maxCount, &count)) {
+                            settings.long_pomodoro_count = count;
+                            save_settings();
+                        }
+                        break;
+                    }
+                    case ID_MENU_SET_SHORT_POMODORO_DURATION: {
+                        int minutes = settings.short_pomodoro_duration;
+                        int maxMinutes = 720 / settings.long_pomodoro_count;
+                        if (PromptForInteger(hwnd, L"短番茄钟时长", L"请输入短番茄钟时长(分钟，长番茄钟总时长不超过720分钟):", minutes, 1, maxMinutes, &minutes)) {
+                            settings.short_pomodoro_duration = minutes;
                             save_settings();
                         }
                         break;
@@ -2871,8 +3137,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                     case ID_MENU_RESET_DEFAULTS:
                         reset_defaults_keep_data();
-                        save_settings();
-                        MessageBoxW(hwnd, L"已恢复默认配置。", L"提示", MB_OK | MB_ICONINFORMATION);
+                        if (save_settings()) {
+                            refresh_timer_icon_by_state(hwnd);
+                            MessageBoxW(hwnd, L"已恢复默认配置。", L"提示", MB_OK | MB_ICONINFORMATION);
+                        }
                         break;
                     case ID_MENU_DATA_LOC_DEFAULT:
                         switch_data_location(hwnd, DATA_LOC_DEFAULT, NULL);
@@ -2899,7 +3167,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             break;
                         }
                         pomodoro_count = 0;
-                        sync_idle_break_type_with_count();
                         save_settings();
                         if (g_hHeatmapWnd) InvalidateRect(g_hHeatmapWnd, NULL, TRUE);
                         refresh_timer_icon_by_state(hwnd);
@@ -2909,7 +3176,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             MessageBoxW(hwnd, L"当前没有活动计时。", L"提示", MB_OK | MB_ICONINFORMATION);
                             break;
                         }
-                        int minutes = (remaining_seconds > 0 ? (remaining_seconds + 59) / 60 : settings.pomodoro_duration);
+                        int minutes = (remaining_seconds > 0 ? (remaining_seconds + 59) / 60 :
+                            (settings.default_pomodoro_is_long ? get_long_pomodoro_duration() : settings.short_pomodoro_duration));
                         if (PromptForInteger(hwnd, L"修改剩余时间", L"请输入剩余分钟(1-720):", minutes, 1, 720, &minutes)) {
                             remaining_seconds = minutes * 60;
                             refresh_timer_icon_by_state(hwnd);
@@ -2944,7 +3212,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                 break;
                             }
                             pomodoro_count = count;
-                            sync_idle_break_type_with_count();
                             save_settings();
                             if (g_hHeatmapWnd) InvalidateRect(g_hHeatmapWnd, NULL, TRUE);
                             refresh_timer_icon_by_state(hwnd);
@@ -2959,6 +3226,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             remaining_seconds = 0;
                         }
                         idle_mode = IDLE_POMODORO;
+                        idle_pomodoro_is_long = 1;
+                        save_settings();
+                        refresh_timer_icon_by_state(hwnd);
+                        break;
+                    case ID_MENU_IDLE_SHORT_POMODORO:
+                        if (is_running || is_paused) {
+                            stop_timer_thread_if_needed();
+                            is_paused = 0;
+                            current_timer_mode = TIMER_NONE;
+                            remaining_seconds = 0;
+                        }
+                        idle_mode = IDLE_POMODORO;
+                        idle_pomodoro_is_long = 0;
                         save_settings();
                         refresh_timer_icon_by_state(hwnd);
                         break;
@@ -3029,6 +3309,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_TOAST_NOTIFY:
             ShowCompletionNotification(hwnd, (int)wParam);
             return 0;
+        case WM_SETTINGS_SAVE_FAILED:
+            MessageBoxW(hwnd,
+                L"配置保存失败。请检查当前数据目录是否可写、磁盘空间是否充足，或 OneDrive 是否可用。",
+                L"保存失败", MB_OK | MB_ICONERROR);
+            return 0;
         default:
             return DefWindowProc(hwnd, msg, wParam, lParam);
     }
@@ -3096,7 +3381,8 @@ static int read_settings_json_buffer(char* buf, size_t bufSize) {
 void load_settings() {
     if (g_settings_lock_ready) EnterCriticalSection(&g_settings_file_lock);
 
-    settings.pomodoro_duration = 25;
+    settings.long_pomodoro_count = 2;
+    settings.short_pomodoro_duration = 45;
     settings.short_break_duration = 5;
     settings.long_break_duration = 15;
     settings.custom_duration = 10;
@@ -3105,14 +3391,18 @@ void load_settings() {
     settings.enable_clock_sound = 0;
     settings.enable_completion_sound = 1;
     settings.show_completion_dialog = 1;
+    settings.default_pomodoro_is_long = 1;
+    settings.default_break_is_long = 0;
     pomodoro_count = 0;
     idle_mode = IDLE_POMODORO;
+    idle_pomodoro_is_long = 1;
     idle_break_is_long = 0;
 
     {
         char buf[1024] = {0};
         if (read_settings_json_buffer(buf, sizeof(buf))) {
-            settings.pomodoro_duration = extract_json_int(buf, "\"pomodoro_duration\"", settings.pomodoro_duration);
+            settings.short_pomodoro_duration = extract_json_int(buf, "\"short_pomodoro_duration\"", settings.short_pomodoro_duration);
+            settings.long_pomodoro_count = extract_json_int(buf, "\"long_pomodoro_count\"", settings.long_pomodoro_count);
             settings.short_break_duration = extract_json_int(buf, "\"short_break_duration\"", settings.short_break_duration);
             settings.long_break_duration = extract_json_int(buf, "\"long_break_duration\"", settings.long_break_duration);
             settings.custom_duration = extract_json_int(buf, "\"custom_duration\"", settings.custom_duration);
@@ -3121,13 +3411,21 @@ void load_settings() {
             settings.enable_clock_sound = extract_json_int(buf, "\"enable_clock_sound\"", settings.enable_clock_sound);
             settings.enable_completion_sound = extract_json_int(buf, "\"enable_completion_sound\"", settings.enable_completion_sound);
             settings.show_completion_dialog = extract_json_int(buf, "\"show_completion_dialog\"", settings.show_completion_dialog);
+            settings.default_pomodoro_is_long = extract_json_int(buf, "\"default_pomodoro_is_long\"", settings.default_pomodoro_is_long);
+            settings.default_break_is_long = extract_json_int(buf, "\"default_break_is_long\"", settings.default_break_is_long);
             pomodoro_count = extract_json_int(buf, "\"pomodoro_count\"", pomodoro_count);
             idle_mode = (IdleMode)extract_json_int(buf, "\"idle_mode\"", (int)idle_mode);
+            idle_pomodoro_is_long = extract_json_int(buf, "\"idle_pomodoro_is_long\"", idle_pomodoro_is_long);
             idle_break_is_long = extract_json_int(buf, "\"idle_break_is_long\"", idle_break_is_long);
         }
     }
 
-    settings.pomodoro_duration = clamp_int(settings.pomodoro_duration, 1, 120);
+    settings.short_pomodoro_duration = clamp_int(settings.short_pomodoro_duration, 1, 720);
+    settings.long_pomodoro_count = clamp_int(settings.long_pomodoro_count, 1, 12);
+    if (settings.short_pomodoro_duration * settings.long_pomodoro_count > 720) {
+        settings.long_pomodoro_count = 720 / settings.short_pomodoro_duration;
+        if (settings.long_pomodoro_count < 1) settings.long_pomodoro_count = 1;
+    }
     settings.short_break_duration = clamp_int(settings.short_break_duration, 1, 60);
     settings.long_break_duration = clamp_int(settings.long_break_duration, 1, 120);
     settings.custom_duration = clamp_int(settings.custom_duration, 1, 720);
@@ -3136,17 +3434,24 @@ void load_settings() {
     settings.enable_clock_sound = settings.enable_clock_sound ? 1 : 0;
     settings.enable_completion_sound = settings.enable_completion_sound ? 1 : 0;
     settings.show_completion_dialog = settings.show_completion_dialog ? 1 : 0;
+    settings.default_pomodoro_is_long = settings.default_pomodoro_is_long ? 1 : 0;
+    settings.default_break_is_long = settings.default_break_is_long ? 1 : 0;
     pomodoro_count = clamp_int(pomodoro_count, 0, 9999);
     if (idle_mode != IDLE_POMODORO && idle_mode != IDLE_BREAK && idle_mode != IDLE_CUSTOM) {
         idle_mode = IDLE_POMODORO;
     }
+    idle_pomodoro_is_long = idle_pomodoro_is_long ? 1 : 0;
     idle_break_is_long = idle_break_is_long ? 1 : 0;
 
     if (g_settings_lock_ready) LeaveCriticalSection(&g_settings_file_lock);
 }
 
 // Save settings to file
-void save_settings() {
+int save_settings(void) {
+    int saved = 0;
+    int writeOk = 0;
+    int longDuration = get_long_pomodoro_duration();
+
     if (g_settings_lock_ready) EnterCriticalSection(&g_settings_file_lock);
 
     if (GetFileAttributesW(g_settings_bak_path) == INVALID_FILE_ATTRIBUTES) {
@@ -3155,31 +3460,55 @@ void save_settings() {
 
     FILE* fp = _wfopen(g_settings_tmp_path, L"w");
     if (fp) {
-    fprintf(fp, "{\"pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_break_is_long\":%d}",
-        settings.pomodoro_duration, settings.short_break_duration, settings.long_break_duration, settings.custom_duration, settings.adjust_block_minutes, settings.toast_auto_collapse_seconds, settings.enable_clock_sound, settings.enable_completion_sound, settings.show_completion_dialog, pomodoro_count, (int)idle_mode, idle_break_is_long);
-        fclose(fp);
-        if (!MoveFileExW(g_settings_tmp_path, g_settings_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-            // Fallback path to avoid silent persistence failures on some systems.
-            DeleteFileW(g_settings_path);
-            if (!MoveFileW(g_settings_tmp_path, g_settings_path)) {
-                DeleteFileW(g_settings_tmp_path);
-                OutputDebugStringA("Failed to save pomodoro_settings.json\n");
-            } else {
-                CopyFileW(g_settings_path, g_settings_bak_path, FALSE);
-            }
-        } else {
+        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d}",
+            longDuration, longDuration, settings.long_pomodoro_count, settings.short_pomodoro_duration,
+            settings.short_break_duration, settings.long_break_duration, settings.custom_duration,
+            settings.adjust_block_minutes, settings.toast_auto_collapse_seconds, settings.enable_clock_sound,
+            settings.enable_completion_sound, settings.show_completion_dialog, settings.default_pomodoro_is_long,
+            settings.default_break_is_long, pomodoro_count, (int)idle_mode, idle_pomodoro_is_long, idle_break_is_long) >= 0;
+        if (writeOk && fflush(fp) != 0) writeOk = 0;
+        if (fclose(fp) != 0) writeOk = 0;
+
+        if (writeOk && MoveFileExW(g_settings_tmp_path, g_settings_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            saved = 1;
+        } else if (writeOk && CopyFileW(g_settings_tmp_path, g_settings_path, FALSE)) {
+            DeleteFileW(g_settings_tmp_path);
+            saved = 1;
+        }
+
+        if (saved) {
             CopyFileW(g_settings_path, g_settings_bak_path, FALSE);
         }
     }
 
     if (g_settings_lock_ready) LeaveCriticalSection(&g_settings_file_lock);
+
+    if (!saved) {
+        OutputDebugStringA("Failed to save pomodoro_settings.json\n");
+        if (g_main_hwnd) {
+            PostMessageW(g_main_hwnd, WM_SETTINGS_SAVE_FAILED, 0, 0);
+        } else {
+            MessageBoxW(NULL,
+                L"配置保存失败。请检查数据目录写入权限、磁盘空间或 OneDrive 状态。",
+                L"保存失败", MB_OK | MB_ICONERROR);
+        }
+    }
+    return saved;
 }
 
 // Main entry point
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nCmdShow) {
+    (void)hPrevInstance;
+    (void)lpCmdLine;
+    (void)nCmdShow;
     HANDLE hEvent = CreateEventW(NULL, TRUE, FALSE, L"PomodoroTimerEvent");
+    if (!hEvent) {
+        MessageBoxW(NULL, L"无法创建程序单实例标识。", L"启动失败", MB_OK | MB_ICONERROR);
+        return 1;
+    }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(NULL, L"程序已在运行，将退出本次启动。", L"提示", MB_OK | MB_ICONWARNING);
+        CloseHandle(hEvent);
         return 0;
     }
 
@@ -3191,9 +3520,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     load_settings();
     pomodoro_count = get_today_count_from_storage();
     refresh_today_count_if_day_changed(NULL, 1);
-    // Startup should always begin from Pomodoro-ready idle state.
+    // Startup begins with the user's selected default Pomodoro mode.
     idle_mode = IDLE_POMODORO;
-    idle_break_is_long = 0;
+    idle_pomodoro_is_long = settings.default_pomodoro_is_long;
+    idle_break_is_long = settings.default_break_is_long;
     autostart_enabled = is_autostart_enabled();
 
     // Force Simplified Chinese UI text pack.
@@ -3204,11 +3534,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = L"Pomodoro";
-    RegisterClassW(&wc);
+    if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        MessageBoxW(NULL, L"程序窗口类注册失败。", L"启动失败", MB_OK | MB_ICONERROR);
+        DeleteCriticalSection(&g_settings_file_lock);
+        g_settings_lock_ready = 0;
+        CloseHandle(hEvent);
+        return 1;
+    }
 
     // Create invisible window
     HWND hwnd = CreateWindowW(L"Pomodoro", L"Pomodoro", 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
+    if (!hwnd) {
+        MessageBoxW(NULL, L"程序主窗口创建失败。", L"启动失败", MB_OK | MB_ICONERROR);
+        DeleteCriticalSection(&g_settings_file_lock);
+        g_settings_lock_ready = 0;
+        CloseHandle(hEvent);
+        return 1;
+    }
     g_main_hwnd = hwnd;
+    g_taskbar_created_message = RegisterWindowMessageW(L"TaskbarCreated");
 
     // Setup tray icon
     nid.cbSize = sizeof(NOTIFYICONDATA);
@@ -3219,7 +3563,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
     wcsncpy(nid.szTip, g_lang->tooltip_pomodoro, sizeof(nid.szTip)/sizeof(nid.szTip[0]) - 1);
     nid.szTip[sizeof(nid.szTip)/sizeof(nid.szTip[0]) - 1] = L'\0';
-    Shell_NotifyIcon(NIM_ADD, &nid);
+    if (!Shell_NotifyIconW(NIM_ADD, &nid)) {
+        MessageBoxW(NULL, L"系统托盘图标创建失败。", L"启动失败", MB_OK | MB_ICONERROR);
+        DestroyWindow(hwnd);
+        CloseHandle(hEvent);
+        return 1;
+    }
 
     // Show initial icon
     update_tray_icon(hwnd, L"\u25BA", pomodoro_count, 0);
@@ -3236,13 +3585,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         DestroyIcon(last_icon);
         last_icon = NULL;
     }
+    CloseHandle(hEvent);
 
     return 0;
 }
 
 // Some toolchains (including portable LLVM-based ones) look for wWinMain
 // when building Unicode Windows apps. Route it to the existing WinMain.
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLine, int nCmdShow) {
+#ifndef _MSC_VER
+int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ PWSTR lpCmdLine, _In_ int nCmdShow) {
     (void)lpCmdLine;
     return WinMain(hInstance, hPrevInstance, NULL, nCmdShow);
 }
+#endif

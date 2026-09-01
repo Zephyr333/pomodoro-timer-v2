@@ -11,10 +11,30 @@ function Resolve-Tool([string[]]$names) {
 $gcc = Resolve-Tool @('gcc')
 $windres = Resolve-Tool @('windres')
 $zig = Resolve-Tool @('zig')
+$vsDevCmd = $null
 
 if ((-not $gcc -or -not $windres) -and -not $zig) {
     $localZig = Get-ChildItem -Path '.\\tools\\zig' -Filter 'zig.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($localZig) { $zig = $localZig.FullName }
+}
+
+if ((-not $gcc -or -not $windres) -and -not $zig) {
+    $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path -LiteralPath $vswhere) {
+        $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if ($vsInstall) {
+            $candidate = Join-Path $vsInstall 'VC\Auxiliary\Build\vcvars64.bat'
+            if (Test-Path -LiteralPath $candidate) { $vsDevCmd = $candidate }
+        }
+    }
+}
+
+$projectExe = Join-Path (Get-Location) 'pomodoro-timer.exe'
+$running = Get-Process -Name 'pomodoro-timer' -ErrorAction SilentlyContinue | Where-Object {
+    $_.Path -and $_.Path -eq $projectExe
+}
+if ($running) {
+    throw 'The project pomodoro-timer.exe is still running. Exit it before building.'
 }
 
 if ($gcc -and $windres) {
@@ -34,8 +54,15 @@ elseif ($zig) {
     & $zig cc 'pomodoro-timer.c' 'pomodoro-timer.res' -municode -lwinmm -lgdi32 -lshell32 -lole32 '-Wl,--subsystem,windows' -o 'pomodoro-timer.exe'
     if ($LASTEXITCODE -ne 0) { throw 'zig cc failed' }
 }
+elseif ($vsDevCmd) {
+    Write-Host "gcc/windres and zig not found. Falling back to MSVC: $vsDevCmd" -ForegroundColor Yellow
+    Remove-Item '.\\pomodoro-timer.exe' -ErrorAction SilentlyContinue
+    $buildCommand = 'call "' + $vsDevCmd + '" >nul && rc.exe /nologo /fo pomodoro-timer.res pomodoro-timer.rc && cl.exe /nologo /utf-8 /D_WIN32_WINNT=0x0600 /D_CRT_SECURE_NO_WARNINGS /W4 /O2 /Fe:pomodoro-timer.exe pomodoro-timer.c pomodoro-timer.res /link /SUBSYSTEM:WINDOWS user32.lib advapi32.lib winmm.lib shell32.lib ole32.lib gdi32.lib'
+    & cmd.exe /d /s /c $buildCommand
+    if ($LASTEXITCODE -ne 0) { throw 'MSVC build failed' }
+}
 else {
-    Write-Host 'No gcc/windres or zig compiler found. Build cannot continue.' -ForegroundColor Red
+    Write-Host 'No gcc/windres, zig, or MSVC Build Tools found. Build cannot continue.' -ForegroundColor Red
     exit 1
 }
 
@@ -45,7 +72,7 @@ if (-not (Test-Path '.\\pomodoro-timer.exe')) {
 }
 
 Write-Host 'Build succeeded. Running smoke test (process should stay alive > 6s)...'
-$proc = Start-Process -FilePath '.\\pomodoro-timer.exe' -PassThru
+$proc = Start-Process -FilePath '.\\pomodoro-timer.exe' -PassThru -WindowStyle Hidden
 
 Wait-Process -Id $proc.Id -Timeout 6 -ErrorAction SilentlyContinue
 if (-not (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue)) {
