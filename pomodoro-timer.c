@@ -1637,7 +1637,8 @@ static void set_idle_mode_after_manual_stop(void) {
     } else if (current_timer_mode == TIMER_CUSTOM) {
         idle_mode = IDLE_CUSTOM;
     } else if (current_timer_mode == TIMER_COUNT_UP) {
-        idle_mode = IDLE_COUNT_UP;
+        idle_mode = IDLE_BREAK;
+        idle_break_is_long = settings.default_break_is_long;
     }
 }
 
@@ -2005,7 +2006,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.4");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.5");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -3017,11 +3018,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     is_running ? L"暂停" : L"继续");
                 AppendMenu(hControlMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_STOP, L"结束");
 
+                AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_COUNT_UP, L"开始正计时");
                 AppendMenu(hStartMenu, MF_STRING, 1, L"开始长番茄钟");
                 AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_SHORT_POMODORO, L"开始短番茄钟");
                 AppendMenu(hStartMenu, MF_STRING, 2, L"开始短休息");
                 AppendMenu(hStartMenu, MF_STRING, 3, L"开始长休息");
-                AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_COUNT_UP, L"开始正计时");
                 AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_CUSTOM, L"开始自定义计时");
 
                 AppendMenu(hAdjustMenu, MF_STRING, ID_MENU_SET_TIME,
@@ -3059,11 +3060,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hDataStoreMenu, MF_STRING | (g_data_location_mode == DATA_LOC_ONEDRIVE ? MF_CHECKED : 0), ID_MENU_DATA_LOC_ONEDRIVE, L"OneDrive");
                 AppendMenu(hDataStoreMenu, MF_STRING | (g_data_location_mode == DATA_LOC_CUSTOM ? MF_CHECKED : 0), ID_MENU_DATA_LOC_CUSTOM, L"自定义位置");
 
+                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_COUNT_UP) ? MF_CHECKED : 0), ID_MENU_IDLE_COUNT_UP, L"正计时");
                     AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_POMODORO && idle_pomodoro_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_POMODORO, L"长番茄钟");
                     AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_POMODORO && !idle_pomodoro_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_SHORT_POMODORO, L"短番茄钟");
                     AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_BREAK && !idle_break_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_SHORT_BREAK, L"短休息");
                     AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_BREAK && idle_break_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_LONG_BREAK, L"长休息");
-                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_COUNT_UP) ? MF_CHECKED : 0), ID_MENU_IDLE_COUNT_UP, L"正计时");
                     AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_CUSTOM) ? MF_CHECKED : 0), ID_MENU_IDLE_CUSTOM, L"自定义计时");
 
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hControlMenu, L"会话");
