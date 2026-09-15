@@ -64,6 +64,7 @@
 #define ID_MENU_SET_LONG_POMODORO_COUNT 344
 #define ID_MENU_START_COUNT_UP 345
 #define ID_MENU_IDLE_COUNT_UP 346
+#define ID_MENU_ENABLE_OVERTIME 347
 #define TOAST_WINDOW_CLASS L"PomodoroToastClass"
 #define HEATMAP_WINDOW_CLASS L"PomodoroHeatmapClass"
 #define WM_TOAST_NOTIFY (WM_APP + 100)
@@ -305,6 +306,7 @@ typedef struct {
     int show_completion_dialog;
     int default_pomodoro_is_long;
     int default_break_is_long;
+    int enable_overtime_count_up;
 } TimerSettings;
 
 typedef enum {
@@ -336,7 +338,7 @@ typedef struct {
 } DayCount;
 
 // Global variables
-TimerSettings settings = {90, 2, 45, 5, 15, 10, 5, 10, 0, 1, 1, 1, 0};
+TimerSettings settings = {90, 2, 45, 5, 15, 10, 5, 10, 0, 1, 1, 1, 0, 1};
 int pomodoro_count = 0;
 int is_running = 0;
 int is_paused = 0;
@@ -345,6 +347,9 @@ int remaining_seconds = 0;
 int is_count_up_timer = 0;
 int count_up_credited = 0;
 int count_up_threshold_seconds = 0;
+int is_overtime = 0;
+int overtime_seconds = 0;
+TimerMode overtime_source_mode = TIMER_NONE;
 TimerMode current_timer_mode = TIMER_NONE;
 IdleMode idle_mode = IDLE_POMODORO;
 int idle_pomodoro_is_long = 1;
@@ -1160,6 +1165,7 @@ static void reset_defaults_keep_data(void) {
     settings.show_completion_dialog = 1;
     settings.default_pomodoro_is_long = 1;
     settings.default_break_is_long = 0;
+    settings.enable_overtime_count_up = 1;
 
     if (!is_running && !is_paused) {
         if (idle_mode == IDLE_POMODORO) {
@@ -1489,12 +1495,25 @@ cleanup:
 void update_tray_icon(HWND hwnd, const wchar_t* text, int dots, int seconds) {
     wchar_t tooltip[128];
     (void)hwnd;
-    if ((is_running || is_paused) && current_timer_mode != TIMER_NONE) {
+    if ((is_running || is_paused) && (current_timer_mode != TIMER_NONE || is_overtime)) {
         int min = seconds / 60, sec = seconds % 60;
-        if (is_count_up_timer) {
-            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"正计时 %d:%02d", min, sec);
+        const wchar_t* pause_suffix = is_paused ? L" (已暂停)" : L"";
+        if (is_overtime) {
+            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"超时正计时 +%02d:%02d%s", min, sec, pause_suffix);
+        } else if (is_count_up_timer) {
+            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"正计时 %02d:%02d%s", min, sec, pause_suffix);
+        } else if (current_timer_mode == TIMER_SHORT_POMODORO) {
+            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"短番茄钟 %02d:%02d%s", min, sec, pause_suffix);
+        } else if (current_timer_mode == TIMER_LONG_POMODORO) {
+            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"长番茄钟 %02d:%02d%s", min, sec, pause_suffix);
+        } else if (current_timer_mode == TIMER_SHORT_BREAK) {
+            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"短休息 %02d:%02d%s", min, sec, pause_suffix);
+        } else if (current_timer_mode == TIMER_LONG_BREAK) {
+            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"长休息 %02d:%02d%s", min, sec, pause_suffix);
+        } else if (current_timer_mode == TIMER_CUSTOM) {
+            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"自定义计时 %02d:%02d%s", min, sec, pause_suffix);
         } else {
-            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"%02d:%02d", min, sec);
+            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"%02d:%02d%s", min, sec, pause_suffix);
         }
     } else {
         if (idle_mode == IDLE_BREAK) {
@@ -1598,6 +1617,22 @@ static void clear_count_up_state(void) {
     count_up_threshold_seconds = 0;
 }
 
+static void close_toast_notification_if_open(void) {
+    if (g_hToastWnd) {
+        DestroyWindow(g_hToastWnd);
+        g_hToastWnd = NULL;
+    }
+}
+
+static void clear_overtime_state(void) {
+    if (is_overtime) {
+        close_toast_notification_if_open();
+    }
+    is_overtime = 0;
+    overtime_seconds = 0;
+    overtime_source_mode = TIMER_NONE;
+}
+
 static void credit_count_up_thresholds(HWND hwnd) {
     int reached;
     int delta;
@@ -1627,16 +1662,17 @@ static void credit_count_up_thresholds(HWND hwnd) {
 }
 
 static void set_idle_mode_after_manual_stop(void) {
-    if (is_pomodoro_mode(current_timer_mode)) {
+    TimerMode effective_mode = is_overtime ? overtime_source_mode : current_timer_mode;
+    if (is_pomodoro_mode(effective_mode)) {
         idle_mode = IDLE_BREAK;
         idle_break_is_long = settings.default_break_is_long;
-    } else if (current_timer_mode == TIMER_SHORT_BREAK || current_timer_mode == TIMER_LONG_BREAK) {
+    } else if (effective_mode == TIMER_SHORT_BREAK || effective_mode == TIMER_LONG_BREAK) {
         idle_mode = IDLE_POMODORO;
         idle_pomodoro_is_long = settings.default_pomodoro_is_long;
         idle_break_is_long = 0;
-    } else if (current_timer_mode == TIMER_CUSTOM) {
+    } else if (effective_mode == TIMER_CUSTOM) {
         idle_mode = IDLE_CUSTOM;
-    } else if (current_timer_mode == TIMER_COUNT_UP) {
+    } else if (effective_mode == TIMER_COUNT_UP) {
         idle_mode = IDLE_BREAK;
         idle_break_is_long = settings.default_break_is_long;
     }
@@ -1645,12 +1681,21 @@ static void set_idle_mode_after_manual_stop(void) {
 static void refresh_timer_icon_by_state(HWND hwnd) {
     if (is_running || is_paused) {
         wchar_t display_text[16];
-        if (remaining_seconds < 60) {
-            _itow(remaining_seconds, display_text, 10);
+        if (is_overtime) {
+            if (overtime_seconds < 60) {
+                swprintf(display_text, sizeof(display_text)/sizeof(display_text[0]), L"+%d", overtime_seconds);
+            } else {
+                swprintf(display_text, sizeof(display_text)/sizeof(display_text[0]), L"+%d", overtime_seconds / 60);
+            }
+            update_tray_icon(hwnd, is_paused ? L"II" : display_text, pomodoro_count, overtime_seconds);
         } else {
-            _itow(remaining_seconds / 60, display_text, 10);
+            if (remaining_seconds < 60) {
+                _itow(remaining_seconds, display_text, 10);
+            } else {
+                _itow(remaining_seconds / 60, display_text, 10);
+            }
+            update_tray_icon(hwnd, is_paused ? L"II" : display_text, pomodoro_count, remaining_seconds);
         }
-        update_tray_icon(hwnd, is_paused ? L"II" : display_text, pomodoro_count, remaining_seconds);
     } else {
         update_tray_icon(hwnd, L"\u25BA", pomodoro_count, 0);
     }
@@ -1663,6 +1708,7 @@ static void start_mode_from_menu(HWND hwnd, TimerMode mode) {
         current_timer_mode = TIMER_NONE;
         remaining_seconds = 0;
         clear_count_up_state();
+        clear_overtime_state();
     }
 
     if (mode == TIMER_LONG_POMODORO) {
@@ -1731,7 +1777,11 @@ DWORD WINAPI timer_thread(LPVOID lpParam) {
 
         if (elapsed_ms >= 1000) {
             int elapsed_sec = (int)(elapsed_ms / 1000);
-            if (is_count_up_timer) {
+            if (is_overtime) {
+                if (overtime_seconds <= 2147483647 - elapsed_sec) {
+                    overtime_seconds += elapsed_sec;
+                }
+            } else if (is_count_up_timer) {
                 if (remaining_seconds <= 2147483647 - elapsed_sec) {
                     remaining_seconds += elapsed_sec;
                 }
@@ -1740,30 +1790,40 @@ DWORD WINAPI timer_thread(LPVOID lpParam) {
             }
             last_tick += (ULONGLONG)elapsed_sec * 1000;
 
-            if (!is_count_up_timer && remaining_seconds < 0) remaining_seconds = 0;
+            if (!is_count_up_timer && !is_overtime && remaining_seconds < 0) remaining_seconds = 0;
 
-            if (!is_count_up_timer && remaining_seconds > 0 && remaining_seconds <= 10 && settings.enable_clock_sound) {
+            if (!is_count_up_timer && !is_overtime && remaining_seconds > 0 && remaining_seconds <= 10 && settings.enable_clock_sound) {
                 Beep(440, 100);
             }
 
-            if (is_count_up_timer) credit_count_up_thresholds(hwnd);
+            if (is_count_up_timer && !is_overtime) credit_count_up_thresholds(hwnd);
 
-            if (remaining_seconds != last_shown_seconds) {
-                wchar_t display_text[16];
-                if (remaining_seconds < 60) {
-                    _itow(remaining_seconds, display_text, 10);
-                } else {
-                    _itow(remaining_seconds / 60, display_text, 10);
+            if (is_overtime) {
+                if (overtime_seconds != last_shown_seconds) {
+                    wchar_t display_text[16];
+                    if (overtime_seconds < 60) {
+                        swprintf(display_text, sizeof(display_text)/sizeof(display_text[0]), L"+%d", overtime_seconds);
+                    } else {
+                        swprintf(display_text, sizeof(display_text)/sizeof(display_text[0]), L"+%d", overtime_seconds / 60);
+                    }
+                    update_tray_icon(hwnd, display_text, pomodoro_count, overtime_seconds);
+                    last_shown_seconds = overtime_seconds;
                 }
-                update_tray_icon(hwnd, display_text, pomodoro_count, remaining_seconds);
-                last_shown_seconds = remaining_seconds;
+            } else {
+                if (remaining_seconds != last_shown_seconds) {
+                    wchar_t display_text[16];
+                    if (remaining_seconds < 60) {
+                        _itow(remaining_seconds, display_text, 10);
+                    } else {
+                        _itow(remaining_seconds / 60, display_text, 10);
+                    }
+                    update_tray_icon(hwnd, display_text, pomodoro_count, remaining_seconds);
+                    last_shown_seconds = remaining_seconds;
+                }
             }
         }
 
-        if (!is_count_up_timer && remaining_seconds <= 0) {
-            is_running = 0;
-            is_paused = 0;
-
+        if (!is_count_up_timer && !is_overtime && remaining_seconds <= 0) {
             stop_clock_loop_sound();
 
             int completed_mode = (int)current_timer_mode;
@@ -1780,19 +1840,46 @@ DWORD WINAPI timer_thread(LPVOID lpParam) {
                 }
             }
 
-            if (is_pomodoro_mode(current_timer_mode)) {
+            if (is_pomodoro_mode((TimerMode)completed_mode)) {
                 idle_mode = IDLE_BREAK;
                 idle_break_is_long = settings.default_break_is_long;
-            } else if (current_timer_mode == TIMER_SHORT_BREAK || current_timer_mode == TIMER_LONG_BREAK) {
+            } else if (completed_mode == TIMER_SHORT_BREAK || completed_mode == TIMER_LONG_BREAK) {
                 idle_mode = IDLE_POMODORO;
                 idle_pomodoro_is_long = settings.default_pomodoro_is_long;
                 idle_break_is_long = 0;
-            } else if (current_timer_mode == TIMER_CUSTOM) {
+            } else if (completed_mode == TIMER_CUSTOM) {
                 idle_mode = IDLE_CUSTOM;
             }
 
+            if (settings.enable_overtime_count_up) {
+                is_overtime = 1;
+                overtime_seconds = 0;
+                overtime_source_mode = (TimerMode)completed_mode;
+                current_timer_mode = TIMER_NONE;
+                clear_count_up_state();
+                save_settings();
+
+                if (settings.enable_completion_sound) {
+                    play_resource_sound("DING_WAV");
+                }
+
+                if (settings.show_completion_dialog) {
+                    PostMessage(hwnd, WM_TOAST_NOTIFY, (WPARAM)completed_mode, 0);
+                }
+
+                wchar_t display_text[16] = L"+0";
+                update_tray_icon(hwnd, display_text, pomodoro_count, 0);
+                last_shown_seconds = 0;
+                last_tick = GetTickCount64();
+                continue;
+            }
+
+            is_running = 0;
+            is_paused = 0;
+
             current_timer_mode = TIMER_NONE;
             clear_count_up_state();
+            clear_overtime_state();
             save_settings();
 
             update_tray_icon(hwnd, L"\u25BA", pomodoro_count, 0);
@@ -1826,6 +1913,7 @@ DWORD WINAPI timer_thread(LPVOID lpParam) {
 // Start timer with specified duration
 void start_timer(HWND hwnd, int duration_minutes, TimerMode mode) {
     stop_timer_thread_if_needed();
+    clear_overtime_state();
 
     is_count_up_timer = mode == TIMER_COUNT_UP;
     count_up_credited = 0;
@@ -2006,7 +2094,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.6");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.7");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -2974,7 +3062,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (LOWORD(lParam) == WM_LBUTTONUP) {
                 // Left click: resume if paused, stop if running, otherwise start current idle mode.
                 if (is_paused) {
-                    if (remaining_seconds > 0 && current_timer_mode != TIMER_NONE) {
+                    if ((remaining_seconds > 0 || is_overtime) && (current_timer_mode != TIMER_NONE || is_overtime)) {
                         is_paused = 0;
                         is_running = 1;
                         launch_timer_thread(hwnd);
@@ -2985,6 +3073,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         current_timer_mode = TIMER_NONE;
                         remaining_seconds = 0;
                         clear_count_up_state();
+                        clear_overtime_state();
                     }
                     refresh_timer_icon_by_state(hwnd);
                 } else if (is_running) {
@@ -2994,6 +3083,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     current_timer_mode = TIMER_NONE;
                     remaining_seconds = 0;
                     clear_count_up_state();
+                    clear_overtime_state();
                     save_settings();
                     refresh_timer_icon_by_state(hwnd);
                 } else {
@@ -3026,13 +3116,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_CUSTOM, L"开始自定义计时");
 
                 AppendMenu(hAdjustMenu, MF_STRING, ID_MENU_SET_TIME,
-                    ((is_running || is_paused) && is_count_up_timer) ? L"修改已计时时间(分钟)" : L"修改当前剩余时间(分钟)");
+                    ((is_running || is_paused) && is_overtime) ? L"修改已超时时间(分钟)" :
+                    (((is_running || is_paused) && is_count_up_timer) ? L"修改已计时时间(分钟)" : L"修改当前剩余时间(分钟)"));
                 AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_PLUS_5_MIN, L"增加步进时间");
                 AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_MINUS_5_MIN, L"减少步进时间");
                 AppendMenu(hAdjustMenu, MF_SEPARATOR, 0, NULL);
-                AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_SET_LONG_POMODORO_COUNT, L"长番茄钟番茄钟数");
                 AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_SET_COUNT, L"修改今日番茄数");
                 AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_RESET_COUNT, L"番茄计数清零");
+                AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_SET_LONG_POMODORO_COUNT, L"长番茄钟番茄钟数");
 
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_POMODORO_DURATION, L"长番茄钟时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_SHORT_POMODORO_DURATION, L"短番茄钟时长(分钟)");
@@ -3045,6 +3136,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hOptionMenu, MF_STRING | (settings.enable_clock_sound ? MF_CHECKED : 0), 4, L"时钟音效");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.enable_completion_sound ? MF_CHECKED : 0), ID_MENU_COMPLETION_SOUND, L"完成声音");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.show_completion_dialog ? MF_CHECKED : 0), 9, L"完成后弹窗");
+                AppendMenu(hOptionMenu, MF_STRING | (settings.enable_overtime_count_up ? MF_CHECKED : 0), ID_MENU_ENABLE_OVERTIME, L"超时正计时");
                 AppendMenu(hOptionMenu, MF_STRING | (autostart_enabled ? MF_CHECKED : 0), 5, L"开机启动");
                 AppendMenu(hOptionMenu, MF_SEPARATOR, 0, NULL);
                 AppendMenu(hOptionMenu, MF_STRING | (settings.default_pomodoro_is_long ? MF_CHECKED : 0), ID_MENU_DEFAULT_LONG_POMODORO, L"默认：长番茄钟");
@@ -3088,6 +3180,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // Handle menu commands
                 switch (cmd) {
                     case ID_MENU_START_CURRENT:
+                        if (is_overtime) {
+                            stop_timer_thread_if_needed();
+                            clear_overtime_state();
+                            clear_count_up_state();
+                        }
                         start_current_idle_mode(hwnd);
                         break;
                     case ID_MENU_PAUSE_RESUME:
@@ -3095,7 +3192,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             stop_timer_thread_if_needed();
                             is_paused = 1;
                             refresh_timer_icon_by_state(hwnd);
-                        } else if (is_paused && remaining_seconds > 0 && current_timer_mode != TIMER_NONE) {
+                        } else if (is_paused && (remaining_seconds > 0 || is_overtime) && (current_timer_mode != TIMER_NONE || is_overtime)) {
                             is_paused = 0;
                             is_running = 1;
                             launch_timer_thread(hwnd);
@@ -3112,6 +3209,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
                             clear_count_up_state();
+                            clear_overtime_state();
                             save_settings();
                             refresh_timer_icon_by_state(hwnd);
                         }
@@ -3156,6 +3254,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                     case 9: // Toggle Completion Dialog
                         settings.show_completion_dialog = !settings.show_completion_dialog;
+                        save_settings();
+                        break;
+                    case ID_MENU_ENABLE_OVERTIME:
+                        settings.enable_overtime_count_up = !settings.enable_overtime_count_up;
                         save_settings();
                         break;
                     case ID_MENU_DEFAULT_LONG_POMODORO:
@@ -3287,6 +3389,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             MessageBoxW(hwnd, L"当前没有活动计时。", L"提示", MB_OK | MB_ICONINFORMATION);
                             break;
                         }
+                        if (is_overtime) {
+                            int minutes = overtime_seconds / 60;
+                            if (PromptForInteger(hwnd, L"修改已超时时间", L"请输入已超时分钟(0-720):", minutes, 0, 720, &minutes)) {
+                                overtime_seconds = minutes * 60;
+                                refresh_timer_icon_by_state(hwnd);
+                            }
+                            break;
+                        }
                         int minutes = is_count_up_timer ? remaining_seconds / 60 :
                             (remaining_seconds > 0 ? (remaining_seconds + 59) / 60 :
                             (settings.default_pomodoro_is_long ? get_long_pomodoro_duration() : settings.short_pomodoro_duration));
@@ -3304,6 +3414,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
                     case ID_MENU_PLUS_5_MIN:
                         if (is_running || is_paused) {
+                            if (is_overtime) {
+                                overtime_seconds = clamp_int(overtime_seconds + settings.adjust_block_minutes * 60, 0, 720 * 60);
+                                refresh_timer_icon_by_state(hwnd);
+                                break;
+                            }
                             int maxSeconds = is_count_up_timer ? 9999 * 60 : 12 * 60 * 60;
                             remaining_seconds = clamp_int(remaining_seconds + settings.adjust_block_minutes * 60,
                                 is_count_up_timer ? 0 : 60, maxSeconds);
@@ -3315,6 +3430,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                     case ID_MENU_MINUS_5_MIN:
                         if (is_running || is_paused) {
+                            if (is_overtime) {
+                                overtime_seconds = clamp_int(overtime_seconds - settings.adjust_block_minutes * 60, 0, 720 * 60);
+                                refresh_timer_icon_by_state(hwnd);
+                                break;
+                            }
                             int minSeconds = is_count_up_timer ? count_up_credited * count_up_threshold_seconds : 1;
                             int maxSeconds = is_count_up_timer ? 9999 * 60 : 12 * 60 * 60;
                             remaining_seconds = clamp_int(remaining_seconds - settings.adjust_block_minutes * 60, minSeconds, maxSeconds);
@@ -3348,6 +3468,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
                             clear_count_up_state();
+                            clear_overtime_state();
                         }
                         idle_mode = IDLE_POMODORO;
                         idle_pomodoro_is_long = 1;
@@ -3361,6 +3482,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
                             clear_count_up_state();
+                            clear_overtime_state();
                         }
                         idle_mode = IDLE_POMODORO;
                         idle_pomodoro_is_long = 0;
@@ -3374,6 +3496,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
                             clear_count_up_state();
+                            clear_overtime_state();
                         }
                         idle_mode = IDLE_BREAK;
                         idle_break_is_long = 0;
@@ -3387,6 +3510,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
                             clear_count_up_state();
+                            clear_overtime_state();
                         }
                         idle_mode = IDLE_BREAK;
                         idle_break_is_long = 1;
@@ -3400,6 +3524,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
                             clear_count_up_state();
+                            clear_overtime_state();
                         }
                         idle_mode = IDLE_COUNT_UP;
                         save_settings();
@@ -3412,6 +3537,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
                             clear_count_up_state();
+                            clear_overtime_state();
                         }
                         idle_mode = IDLE_CUSTOM;
                         save_settings();
@@ -3534,6 +3660,7 @@ void load_settings() {
     settings.show_completion_dialog = 1;
     settings.default_pomodoro_is_long = 1;
     settings.default_break_is_long = 0;
+    settings.enable_overtime_count_up = 1;
     pomodoro_count = 0;
     idle_mode = IDLE_POMODORO;
     idle_pomodoro_is_long = 1;
@@ -3556,6 +3683,7 @@ void load_settings() {
             settings.show_completion_dialog = extract_json_int(buf, "\"show_completion_dialog\"", settings.show_completion_dialog);
             settings.default_pomodoro_is_long = extract_json_int(buf, "\"default_pomodoro_is_long\"", settings.default_pomodoro_is_long);
             settings.default_break_is_long = extract_json_int(buf, "\"default_break_is_long\"", settings.default_break_is_long);
+            settings.enable_overtime_count_up = extract_json_int(buf, "\"enable_overtime_count_up\"", settings.enable_overtime_count_up);
             pomodoro_count = extract_json_int(buf, "\"pomodoro_count\"", pomodoro_count);
             idle_mode = (IdleMode)extract_json_int(buf, "\"idle_mode\"", (int)idle_mode);
             idle_pomodoro_is_long = extract_json_int(buf, "\"idle_pomodoro_is_long\"", idle_pomodoro_is_long);
@@ -3576,6 +3704,7 @@ void load_settings() {
     settings.show_completion_dialog = settings.show_completion_dialog ? 1 : 0;
     settings.default_pomodoro_is_long = settings.default_pomodoro_is_long ? 1 : 0;
     settings.default_break_is_long = settings.default_break_is_long ? 1 : 0;
+    settings.enable_overtime_count_up = settings.enable_overtime_count_up ? 1 : 0;
     pomodoro_count = clamp_int(pomodoro_count, 0, 9999);
     if (idle_mode != IDLE_POMODORO && idle_mode != IDLE_BREAK && idle_mode != IDLE_CUSTOM && idle_mode != IDLE_COUNT_UP) {
         idle_mode = IDLE_POMODORO;
@@ -3600,12 +3729,12 @@ int save_settings(void) {
 
     FILE* fp = _wfopen(g_settings_tmp_path, L"w");
     if (fp) {
-        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d}",
+        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"enable_overtime_count_up\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d}",
             longDuration, longDuration, settings.long_pomodoro_count, settings.short_pomodoro_duration,
             settings.short_break_duration, settings.long_break_duration, settings.custom_duration,
             settings.adjust_block_minutes, settings.toast_auto_collapse_seconds, settings.enable_clock_sound,
             settings.enable_completion_sound, settings.show_completion_dialog, settings.default_pomodoro_is_long,
-            settings.default_break_is_long, pomodoro_count, (int)idle_mode, idle_pomodoro_is_long, idle_break_is_long) >= 0;
+            settings.default_break_is_long, settings.enable_overtime_count_up, pomodoro_count, (int)idle_mode, idle_pomodoro_is_long, idle_break_is_long) >= 0;
         if (writeOk && fflush(fp) != 0) writeOk = 0;
         if (fclose(fp) != 0) writeOk = 0;
 
