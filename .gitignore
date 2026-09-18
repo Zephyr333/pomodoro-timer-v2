@@ -6,3 +6,5 @@
 *.bak
 
 tools/zig/
+tools/.fullscreen-test/
+tools/.release-*/

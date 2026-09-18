@@ -9,6 +9,8 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#include <commdlg.h>
+#include <stdlib.h>
 #include <shlobj.h>
 #include <knownfolders.h>
 #include <direct.h>
@@ -307,6 +309,7 @@ typedef struct {
     int default_pomodoro_is_long;
     int default_break_is_long;
     int enable_overtime_count_up;
+    int fullscreen_colors[5];
 } TimerSettings;
 
 typedef enum {
@@ -338,7 +341,8 @@ typedef struct {
 } DayCount;
 
 // Global variables
-TimerSettings settings = {90, 2, 45, 5, 15, 10, 5, 10, 0, 1, 1, 1, 0, 1};
+TimerSettings settings = {90, 2, 45, 5, 15, 10, 5, 10, 0, 1, 1, 1, 0, 1,
+    {0x7F8C98, 0x829889, 0x8C86A3, 0xA39182, 0xC79A52}};
 int pomodoro_count = 0;
 int is_running = 0;
 int is_paused = 0;
@@ -476,6 +480,10 @@ static void clear_count_up_state(void);
 static int get_long_pomodoro_duration(void);
 static TimerMode get_default_pomodoro_mode(void);
 static TimerMode get_default_break_mode(void);
+
+static void close_toast_notification_if_open(void);
+static void center_window_on_work_area(HWND hwnd);
+#include "fullscreen.h"
 
 static int clamp_int(int value, int minValue, int maxValue) {
     if (value < minValue) return minValue;
@@ -1166,6 +1174,7 @@ static void reset_defaults_keep_data(void) {
     settings.default_pomodoro_is_long = 1;
     settings.default_break_is_long = 0;
     settings.enable_overtime_count_up = 1;
+    memcpy(settings.fullscreen_colors, fs_default_colors, sizeof(fs_default_colors));
 
     if (!is_running && !is_paused) {
         if (idle_mode == IDLE_POMODORO) {
@@ -1827,6 +1836,7 @@ DWORD WINAPI timer_thread(LPVOID lpParam) {
             stop_clock_loop_sound();
 
             int completed_mode = (int)current_timer_mode;
+            LONG completed_fs_session = InterlockedCompareExchange(&fs_session, 0, 0);
 
             if (is_pomodoro_mode(current_timer_mode)) {
                 int completedCount = current_timer_mode == TIMER_LONG_POMODORO ? settings.long_pomodoro_count : 1;
@@ -1882,6 +1892,7 @@ DWORD WINAPI timer_thread(LPVOID lpParam) {
             clear_overtime_state();
             save_settings();
 
+            PostMessageW(hwnd, WM_FS_COMPLETED, (WPARAM)completed_mode, (LPARAM)completed_fs_session);
             update_tray_icon(hwnd, L"\u25BA", pomodoro_count, 0);
             if (settings.enable_completion_sound) {
                 play_resource_sound("DING_WAV");
@@ -1912,6 +1923,8 @@ DWORD WINAPI timer_thread(LPVOID lpParam) {
 
 // Start timer with specified duration
 void start_timer(HWND hwnd, int duration_minutes, TimerMode mode) {
+    fs_completed_mode = TIMER_NONE;
+    InterlockedIncrement(&fs_session);
     stop_timer_thread_if_needed();
     clear_overtime_state();
 
@@ -2094,7 +2107,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.7");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.8");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -3089,6 +3102,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 } else {
                     start_current_idle_mode(hwnd);
                 }
+            } else if (LOWORD(lParam) == WM_MBUTTONUP) {
+                fs_toggle();
             } else if (LOWORD(lParam) == WM_RBUTTONUP) {
                 // Right click: show context menu
                 HMENU hMenu = CreatePopupMenu();
@@ -3098,6 +3113,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 HMENU hDurationMenu = CreatePopupMenu();
                 HMENU hOptionMenu = CreatePopupMenu();
                 HMENU hDataOpsMenu = CreatePopupMenu();
+                HMENU hColorMenu = fs_create_color_menu();
                 HMENU hDataStoreMenu = CreatePopupMenu();
                 HMENU hIdleMenu = CreatePopupMenu();
                 UINT idleAvailability = (is_running || is_paused) ? MF_GRAYED : MF_ENABLED;
@@ -3107,6 +3123,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hControlMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_PAUSE_RESUME,
                     is_running ? L"暂停" : L"继续");
                 AppendMenu(hControlMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_STOP, L"结束");
+                AppendMenu(hControlMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenu(hControlMenu, MF_STRING | (fs_active ? MF_CHECKED : 0), ID_MENU_FULLSCREEN, L"全屏");
 
                 AppendMenu(hStartMenu, MF_STRING, 1, L"开始长番茄钟");
                 AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_SHORT_POMODORO, L"开始短番茄钟");
@@ -3165,6 +3183,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hAdjustMenu, L"调整");
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hDurationMenu, L"时长");
                 AppendMenu(hMenu, MF_POPUP | ((is_running || is_paused) ? MF_GRAYED : 0), (UINT_PTR)hDataOpsMenu, L"操作");
+                AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hColorMenu, L"颜色");
                 AppendMenu(hMenu, MF_POPUP | ((is_running || is_paused) ? MF_GRAYED : 0), (UINT_PTR)hDataStoreMenu, L"存储");
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hOptionMenu, L"偏好");
                 AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
@@ -3179,6 +3198,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 // Handle menu commands
                 switch (cmd) {
+                    case ID_MENU_FULLSCREEN:
+                        fs_toggle();
+                        break;
+                    case ID_MENU_COLOR_FIRST:
+                    case ID_MENU_COLOR_FIRST + 1:
+                    case ID_MENU_COLOR_FIRST + 2:
+                    case ID_MENU_COLOR_FIRST + 3:
+                    case ID_MENU_COLOR_FIRST + 4:
+                        fs_show_color(hwnd, cmd - ID_MENU_COLOR_FIRST);
+                        break;
+                    case ID_MENU_COLOR_RESET:
+                        fs_save_palette(fs_default_colors);
+                        break;
                     case ID_MENU_START_CURRENT:
                         if (is_overtime) {
                             stop_timer_thread_if_needed();
@@ -3547,14 +3579,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         generate_and_open_report(hwnd);
                         break;
                     case 8: // Exit
-                        Shell_NotifyIcon(NIM_DELETE, &nid);
-                        PostQuitMessage(0);
+                        DestroyWindow(hwnd);
                         break;
                 }
                 DestroyMenu(hMenu);
             }
             break;
+        case WM_FS_COMPLETED:
+            if (fs_active && (LONG)lParam == InterlockedCompareExchange(&fs_session, 0, 0) && !is_running && !is_paused) {
+                fs_completed_mode = (TimerMode)wParam;
+                fs_refresh();
+            }
+            return 0;
+        case WM_DISPLAYCHANGE:
+        case WM_FS_LAYOUT:
+            if (fs_active) SetTimer(hwnd, ID_FS_LAYOUT, 200, NULL);
+            return 0;
         case WM_TIMER:
+            if (wParam == ID_FS_REFRESH) { fs_refresh(); return 0; }
+            if (wParam == ID_FS_LAYOUT) { KillTimer(hwnd, ID_FS_LAYOUT); fs_build_windows(); return 0; }
             if (wParam == ID_MAIN_DAY_SYNC_TIMER) {
                 refresh_today_count_if_day_changed(hwnd, 0);
                 return 0;
@@ -3562,6 +3605,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         case WM_DESTROY:
             // Clean up before exit
+            fs_exit();
             KillTimer(hwnd, ID_MAIN_DAY_SYNC_TIMER);
             stop_timer_thread_if_needed();
             is_paused = 0;
@@ -3573,7 +3617,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             PostQuitMessage(0);
             break;
         case WM_TOAST_NOTIFY:
-            ShowCompletionNotification(hwnd, (int)wParam);
+            if (!fs_active) ShowCompletionNotification(hwnd, (int)wParam);
             return 0;
         case WM_SETTINGS_SAVE_FAILED:
             MessageBoxW(hwnd,
@@ -3661,13 +3705,14 @@ void load_settings() {
     settings.default_pomodoro_is_long = 1;
     settings.default_break_is_long = 0;
     settings.enable_overtime_count_up = 1;
+    memcpy(settings.fullscreen_colors, fs_default_colors, sizeof(fs_default_colors));
     pomodoro_count = 0;
     idle_mode = IDLE_POMODORO;
     idle_pomodoro_is_long = 1;
     idle_break_is_long = 0;
 
     {
-        char buf[1024] = {0};
+        char buf[2048] = {0};
         if (read_settings_json_buffer(buf, sizeof(buf))) {
             settings.long_pomodoro_duration = extract_json_int(buf, "\"long_pomodoro_duration\"",
                 extract_json_int(buf, "\"pomodoro_duration\"", settings.long_pomodoro_duration));
@@ -3684,6 +3729,13 @@ void load_settings() {
             settings.default_pomodoro_is_long = extract_json_int(buf, "\"default_pomodoro_is_long\"", settings.default_pomodoro_is_long);
             settings.default_break_is_long = extract_json_int(buf, "\"default_break_is_long\"", settings.default_break_is_long);
             settings.enable_overtime_count_up = extract_json_int(buf, "\"enable_overtime_count_up\"", settings.enable_overtime_count_up);
+            {
+                int i;
+                for (i = 0; i < 5; ++i) {
+                    int rgb = extract_json_int(buf, fs_color_keys[i], fs_default_colors[i]);
+                    settings.fullscreen_colors[i] = rgb >= 0 && rgb <= 0xFFFFFF ? rgb : fs_default_colors[i];
+                }
+            }
             pomodoro_count = extract_json_int(buf, "\"pomodoro_count\"", pomodoro_count);
             idle_mode = (IdleMode)extract_json_int(buf, "\"idle_mode\"", (int)idle_mode);
             idle_pomodoro_is_long = extract_json_int(buf, "\"idle_pomodoro_is_long\"", idle_pomodoro_is_long);
@@ -3729,12 +3781,14 @@ int save_settings(void) {
 
     FILE* fp = _wfopen(g_settings_tmp_path, L"w");
     if (fp) {
-        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"enable_overtime_count_up\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d}",
+        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"enable_overtime_count_up\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d,\"fullscreen_focus_color\":%d,\"fullscreen_break_color\":%d,\"fullscreen_count_up_color\":%d,\"fullscreen_custom_color\":%d,\"fullscreen_overtime_color\":%d}",
             longDuration, longDuration, settings.long_pomodoro_count, settings.short_pomodoro_duration,
             settings.short_break_duration, settings.long_break_duration, settings.custom_duration,
             settings.adjust_block_minutes, settings.toast_auto_collapse_seconds, settings.enable_clock_sound,
             settings.enable_completion_sound, settings.show_completion_dialog, settings.default_pomodoro_is_long,
-            settings.default_break_is_long, settings.enable_overtime_count_up, pomodoro_count, (int)idle_mode, idle_pomodoro_is_long, idle_break_is_long) >= 0;
+            settings.default_break_is_long, settings.enable_overtime_count_up, pomodoro_count, (int)idle_mode, idle_pomodoro_is_long, idle_break_is_long,
+            settings.fullscreen_colors[0], settings.fullscreen_colors[1], settings.fullscreen_colors[2],
+            settings.fullscreen_colors[3], settings.fullscreen_colors[4]) >= 0;
         if (writeOk && fflush(fp) != 0) writeOk = 0;
         if (fclose(fp) != 0) writeOk = 0;
 

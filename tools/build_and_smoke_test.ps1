@@ -1,3 +1,5 @@
+﻿param([switch]$BuildOnly)
+
 $ErrorActionPreference = 'Stop'
 
 function Resolve-Tool([string[]]$names) {
@@ -43,7 +45,7 @@ if ($gcc -and $windres) {
     Remove-Item '.\\pomodoro-timer.exe' -ErrorAction SilentlyContinue
     & $windres 'pomodoro-timer.rc' -o 'pomodoro-timer_res.o'
     if ($LASTEXITCODE -ne 0) { throw 'windres failed' }
-    & $gcc -ffunction-sections -fdata-sections -s -o 'pomodoro-timer.exe' 'pomodoro-timer.c' 'pomodoro-timer_res.o' -mwindows -lwinmm -lole32 '-Wl,--gc-sections' -static-libgcc
+    & $gcc -ffunction-sections -fdata-sections -s -o 'pomodoro-timer.exe' 'pomodoro-timer.c' 'pomodoro-timer_res.o' -mwindows -lwinmm -lole32 -lgdi32 -lshell32 -lcomdlg32 '-Wl,--gc-sections' -static-libgcc
     if ($LASTEXITCODE -ne 0) { throw 'gcc failed' }
 }
 elseif ($zig) {
@@ -51,13 +53,13 @@ elseif ($zig) {
     Remove-Item '.\\pomodoro-timer.exe' -ErrorAction SilentlyContinue
     & $zig rc '/fo' 'pomodoro-timer.res' 'pomodoro-timer.rc'
     if ($LASTEXITCODE -ne 0) { throw 'zig rc failed' }
-    & $zig cc 'pomodoro-timer.c' 'pomodoro-timer.res' -municode -lwinmm -lgdi32 -lshell32 -lole32 '-Wl,--subsystem,windows' -o 'pomodoro-timer.exe'
+    & $zig cc 'pomodoro-timer.c' 'pomodoro-timer.res' -municode -lcomdlg32 -lwinmm -lgdi32 -lshell32 -lole32 '-Wl,--subsystem,windows' -o 'pomodoro-timer.exe'
     if ($LASTEXITCODE -ne 0) { throw 'zig cc failed' }
 }
 elseif ($vsDevCmd) {
     Write-Host "gcc/windres and zig not found. Falling back to MSVC: $vsDevCmd" -ForegroundColor Yellow
     Remove-Item '.\\pomodoro-timer.exe' -ErrorAction SilentlyContinue
-    $buildCommand = 'call "' + $vsDevCmd + '" >nul && rc.exe /nologo /fo pomodoro-timer.res pomodoro-timer.rc && cl.exe /nologo /utf-8 /D_WIN32_WINNT=0x0600 /D_CRT_SECURE_NO_WARNINGS /W4 /O2 /Fe:pomodoro-timer.exe pomodoro-timer.c pomodoro-timer.res /link /SUBSYSTEM:WINDOWS user32.lib advapi32.lib winmm.lib shell32.lib ole32.lib gdi32.lib'
+    $buildCommand = 'call "' + $vsDevCmd + '" >nul && rc.exe /nologo /fo pomodoro-timer.res pomodoro-timer.rc && cl.exe /nologo /utf-8 /D_WIN32_WINNT=0x0600 /D_CRT_SECURE_NO_WARNINGS /W4 /O2 /Fe:pomodoro-timer.exe pomodoro-timer.c pomodoro-timer.res /link /SUBSYSTEM:WINDOWS user32.lib advapi32.lib winmm.lib shell32.lib ole32.lib gdi32.lib comdlg32.lib'
     & cmd.exe /d /s /c $buildCommand
     if ($LASTEXITCODE -ne 0) { throw 'MSVC build failed' }
 }
@@ -69,6 +71,14 @@ else {
 if (-not (Test-Path '.\\pomodoro-timer.exe')) {
     Write-Host 'Build failed: pomodoro-timer.exe was not generated.' -ForegroundColor Red
     exit 1
+}
+
+if ($BuildOnly) {
+    Write-Host 'Build succeeded (build only).'
+    exit 0
+}
+if (Get-Process -Name 'pomodoro-timer' -ErrorAction SilentlyContinue) {
+    throw 'A pomodoro-timer instance is running. Build succeeded; exit it before smoke testing, or use -BuildOnly.'
 }
 
 Write-Host 'Build succeeded. Running smoke test (process should stay alive > 6s)...'
