@@ -282,7 +282,7 @@ static void fs_toggle(void) {
     if (fs_active && !SetTimer(g_main_hwnd, ID_FS_REFRESH, 100, NULL)) fs_exit();
 }
 
-static const wchar_t *fs_color_names[5] = {L"专注", L"休息", L"正计时", L"自定义", L"超时"};
+static const wchar_t *fs_color_names[5] = {L"番茄钟", L"休息", L"正计时", L"自定义", L"超时"};
 
 typedef struct { int index; int color; } FullscreenColorDraft;
 
