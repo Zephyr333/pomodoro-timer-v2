@@ -293,6 +293,23 @@ int wmain(int argc, wchar_t **argv) {
         if (fs_count) SendMessageW(fs_windows[0], WM_LBUTTONDOWN, MK_LBUTTON, 0);
     }
     CHECK(!fs_active && !fs_count, "click exits all overlays");
+
+    /* Test right click toggle and mouse hover HUD prompt in fullscreen */
+    fs_toggle(); pump(50);
+    CHECK(fs_active && !is_running, "re-entered fullscreen in idle state");
+    if (fs_count) {
+        SendMessageW(fs_windows[0], WM_MOUSEMOVE, 0, MAKELPARAM(100, 100));
+        pump(20);
+        CHECK(fs_hud_visible, "mouse move in fullscreen activates HUD prompt");
+        SendMessageW(fs_windows[0], WM_RBUTTONUP, 0, MAKELPARAM(100, 100));
+        pump(100);
+        CHECK(fs_active && is_running, "right click in fullscreen starts timer without exiting");
+        SendMessageW(fs_windows[0], WM_RBUTTONUP, 0, MAKELPARAM(100, 100));
+        pump(100);
+        CHECK(fs_active && !is_running, "right click again stops timer and stays fullscreen");
+        SendMessageW(fs_windows[0], WM_KEYDOWN, VK_ESCAPE, 0); pump(50);
+    }
+    CHECK(!fs_active, "escape exits fullscreen after right click test");
     CHECK(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) <= gdi_before + 2, "repeated entry and paint do not leak GDI objects");
 
     dialog_case = 1; dialog_index = 0;

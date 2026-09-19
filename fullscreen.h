@@ -12,6 +12,7 @@
 #define IDC_FS_ERROR 5131
 #define ID_FS_REFRESH 4002
 #define ID_FS_LAYOUT 4003
+#define ID_FS_HUD_TIMER 4004
 #define WM_FS_COMPLETED (WM_APP + 102)
 #define WM_FS_LAYOUT (WM_APP + 103)
 
@@ -37,6 +38,8 @@ static TimerMode fs_completed_mode;
 static volatile LONG fs_session;
 static HWND fs_previous_foreground;
 static FullscreenView fs_view;
+static int fs_hud_visible;
+static POINT fs_last_cursor;
 
 static COLORREF fs_colorref(int rgb) {
     return RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
@@ -138,10 +141,12 @@ static void fs_refresh(void) {
 
 static void fs_destroy_windows(void) {
     size_t i;
+    if (fs_count > 0) KillTimer(fs_windows[0], ID_FS_HUD_TIMER);
     for (i = 0; i < fs_count; ++i) DestroyWindow(fs_windows[i]);
     free(fs_windows);
     fs_windows = NULL;
     fs_count = 0;
+    fs_hud_visible = 0;
 }
 
 static void fs_exit(void) {
@@ -151,6 +156,7 @@ static void fs_exit(void) {
     if (!fs_active) return;
     for (i = 0; i < fs_count; ++i) if (foreground == fs_windows[i]) restore = 1;
     fs_active = 0;
+    fs_hud_visible = 0;
     InterlockedIncrement(&fs_session);
     KillTimer(g_main_hwnd, ID_FS_REFRESH);
     KillTimer(g_main_hwnd, ID_FS_LAYOUT);
@@ -212,6 +218,21 @@ static void fs_paint(HWND hwnd) {
         DrawTextW(dc, fs_view.time, -1, &line, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(dc, previous_font);
     }
+    if (fs_hud_visible) {
+        HFONT hud_font;
+        HGDIOBJ old_hud_font;
+        int hud_size = max(12, min(height / 40, 16));
+        RECT hud_rect = bounds;
+        hud_rect.top = bounds.bottom - hud_size * 3;
+        hud_rect.bottom = bounds.bottom - hud_size;
+        hud_font = CreateFontW(-hud_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+        old_hud_font = SelectObject(dc, hud_font);
+        SetTextColor(dc, RGB(110, 115, 120));
+        DrawTextW(dc, L"[右键] 开始 / 停止    [左键 / Esc] 退出全屏", -1, &hud_rect, DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, old_hud_font);
+        DeleteObject(hud_font);
+    }
     BitBlt(target, 0, 0, width, height, dc, 0, 0, SRCCOPY);
     DeleteObject(digits);
     SelectObject(dc, previous_bitmap); DeleteObject(bitmap); DeleteDC(dc);
@@ -222,11 +243,54 @@ static LRESULT CALLBACK FullscreenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     switch (msg) {
         case WM_PAINT: fs_paint(hwnd); return 0;
         case WM_ERASEBKGND: return 1;
-        case WM_SETCURSOR: SetCursor(NULL); return TRUE;
-        case WM_KEYDOWN: if (wParam == VK_ESCAPE) { fs_exit(); return 0; } break;
-        case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_XBUTTONDOWN:
-        case WM_CLOSE: fs_exit(); return 0;
-        case WM_DISPLAYCHANGE: case 0x02E0: /* WM_DPICHANGED */
+        case WM_SETCURSOR:
+            if (fs_hud_visible) {
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return TRUE;
+            }
+            SetCursor(NULL);
+            return TRUE;
+        case WM_MOUSEMOVE: {
+            POINT pt;
+            GetCursorPos(&pt);
+            if (pt.x != fs_last_cursor.x || pt.y != fs_last_cursor.y) {
+                size_t i;
+                fs_last_cursor = pt;
+                if (!fs_hud_visible) {
+                    fs_hud_visible = 1;
+                    for (i = 0; i < fs_count; ++i) InvalidateRect(fs_windows[i], NULL, FALSE);
+                }
+                if (fs_count > 0) SetTimer(fs_windows[0], ID_FS_HUD_TIMER, 1500, NULL);
+            }
+            return 0;
+        }
+        case WM_TIMER:
+            if (wParam == ID_FS_HUD_TIMER) {
+                size_t i;
+                KillTimer(hwnd, ID_FS_HUD_TIMER);
+                fs_hud_visible = 0;
+                SetCursor(NULL);
+                for (i = 0; i < fs_count; ++i) InvalidateRect(fs_windows[i], NULL, FALSE);
+                return 0;
+            }
+            break;
+        case WM_KEYDOWN:
+            if (wParam == VK_ESCAPE) { fs_exit(); return 0; }
+            break;
+        case WM_RBUTTONDOWN:
+            return 0;
+        case WM_RBUTTONUP:
+            SendMessageW(g_main_hwnd, WM_USER + 1, 0, WM_LBUTTONUP);
+            fs_refresh();
+            return 0;
+        case WM_LBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        case WM_XBUTTONDOWN:
+        case WM_CLOSE:
+            fs_exit();
+            return 0;
+        case WM_DISPLAYCHANGE:
+        case 0x02E0: /* WM_DPICHANGED */
             if (!fs_building) PostMessageW(g_main_hwnd, WM_FS_LAYOUT, 0, 0);
             return 0;
     }
@@ -288,6 +352,8 @@ static void fs_toggle(void) {
     fs_completed_mode = TIMER_NONE;
     InterlockedIncrement(&fs_session);
     fs_active = 1;
+    fs_hud_visible = 0;
+    GetCursorPos(&fs_last_cursor);
     close_toast_notification_if_open();
     fs_build_windows();
     if (fs_active && !SetTimer(g_main_hwnd, ID_FS_REFRESH, 100, NULL)) fs_exit();
