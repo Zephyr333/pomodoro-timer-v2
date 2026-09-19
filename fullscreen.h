@@ -136,6 +136,7 @@ static void fs_refresh(void) {
         swprintf(title, 160, L"%ls %ls — 番茄钟全屏", fs_view.time, fs_view.status);
         SetWindowTextW(fs_windows[i], title);
         InvalidateRect(fs_windows[i], NULL, FALSE);
+        UpdateWindow(fs_windows[i]);
     }
 }
 
@@ -221,15 +222,15 @@ static void fs_paint(HWND hwnd) {
     if (fs_hud_visible) {
         HFONT hud_font;
         HGDIOBJ old_hud_font;
-        int hud_size = max(12, min(height / 40, 16));
+        int hud_size = max(14, min(height / 50, width / 45));
         RECT hud_rect = bounds;
-        hud_rect.top = bounds.bottom - hud_size * 3;
-        hud_rect.bottom = bounds.bottom - hud_size;
+        hud_rect.bottom = bounds.bottom - hud_size * 2;
+        hud_rect.top = hud_rect.bottom - hud_size * 2;
         hud_font = CreateFontW(-hud_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
         old_hud_font = SelectObject(dc, hud_font);
         SetTextColor(dc, RGB(110, 115, 120));
-        DrawTextW(dc, L"[右键] 开始 / 停止    [左键 / Esc] 退出全屏", -1, &hud_rect, DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(dc, L"[左键 / Esc] 退出全屏    [右键] 开始 / 停止", -1, &hud_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(dc, old_hud_font);
         DeleteObject(hud_font);
     }
@@ -278,8 +279,13 @@ static LRESULT CALLBACK FullscreenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             if (wParam == VK_ESCAPE) { fs_exit(); return 0; }
             break;
         case WM_RBUTTONDOWN:
+        case WM_RBUTTONDBLCLK:
             return 0;
         case WM_RBUTTONUP:
+            if (!fs_hud_visible) {
+                fs_hud_visible = 1;
+            }
+            if (fs_count > 0) SetTimer(fs_windows[0], ID_FS_HUD_TIMER, 1500, NULL);
             SendMessageW(g_main_hwnd, WM_USER + 1, 0, WM_LBUTTONUP);
             fs_refresh();
             return 0;
@@ -343,6 +349,7 @@ static void fs_build_windows(void) {
 static void fs_toggle(void) {
     WNDCLASSW wc = {0};
     if (fs_active) { fs_exit(); return; }
+    wc.style = CS_DBLCLKS;
     wc.hInstance = GetModuleHandleW(NULL);
     wc.lpfnWndProc = FullscreenWndProc;
     wc.lpszClassName = L"PomodoroFullscreen";

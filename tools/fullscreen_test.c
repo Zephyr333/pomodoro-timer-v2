@@ -307,6 +307,21 @@ int wmain(int argc, wchar_t **argv) {
         SendMessageW(fs_windows[0], WM_RBUTTONUP, 0, MAKELPARAM(100, 100));
         pump(100);
         CHECK(fs_active && !is_running, "right click again stops timer and stays fullscreen");
+
+        /* Test rapid right-click double-click toggles without delay */
+        SendMessageW(fs_windows[0], WM_RBUTTONDOWN, 0, 0);
+        SendMessageW(fs_windows[0], WM_RBUTTONUP, 0, 0);
+        CHECK(fs_active && is_running, "rapid click 1 starts timer");
+        SendMessageW(fs_windows[0], WM_RBUTTONDBLCLK, 0, 0);
+        SendMessageW(fs_windows[0], WM_RBUTTONUP, 0, 0);
+        CHECK(fs_active && !is_running, "rapid click 2 stops timer");
+        SendMessageW(fs_windows[0], WM_RBUTTONDOWN, 0, 0);
+        SendMessageW(fs_windows[0], WM_RBUTTONUP, 0, 0);
+        CHECK(fs_active && is_running, "rapid click 3 starts timer again");
+        SendMessageW(fs_windows[0], WM_RBUTTONDBLCLK, 0, 0);
+        SendMessageW(fs_windows[0], WM_RBUTTONUP, 0, 0);
+        CHECK(fs_active && !is_running, "rapid click 4 stops timer again");
+
         SendMessageW(fs_windows[0], WM_KEYDOWN, VK_ESCAPE, 0); pump(50);
     }
     CHECK(!fs_active, "escape exits fullscreen after right click test");
