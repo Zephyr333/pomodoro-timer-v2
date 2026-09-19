@@ -340,12 +340,33 @@ static INT_PTR CALLBACK FullscreenColorsDlgProc(HWND dialog, UINT msg, WPARAM wP
         case WM_DRAWITEM: {
             DRAWITEMSTRUCT *draw = (DRAWITEMSTRUCT *)lParam;
             HGDIOBJ old_font;
+            HFONT preview_font = NULL;
+            int box_h, box_w, font_size;
+            const wchar_t *text;
+            SIZE measured;
             if (!draft || draw->CtlID != IDC_FS_PREVIEW_FIRST) break;
             FillRect(draw->hDC, &draw->rcItem, (HBRUSH)GetStockObject(BLACK_BRUSH));
-            SetBkMode(draw->hDC, TRANSPARENT); SetTextColor(draw->hDC, fs_colorref(draft->color));
-            old_font = SelectObject(draw->hDC, (HFONT)SendMessageW(dialog, WM_GETFONT, 0, 0));
-            DrawTextW(draw->hDC, draft->index == 4 ? L"+03:12" : L"25:00", -1, &draw->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SetBkMode(draw->hDC, TRANSPARENT);
+            SetTextColor(draw->hDC, fs_colorref(draft->color));
+            box_h = draw->rcItem.bottom - draw->rcItem.top;
+            box_w = draw->rcItem.right - draw->rcItem.left;
+            font_size = box_h * 5 / 8;
+            if (font_size < 12) font_size = 12;
+            preview_font = CreateFontW(-font_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FIXED_PITCH, L"Consolas");
+            old_font = SelectObject(draw->hDC, preview_font ? (HGDIOBJ)preview_font : (HGDIOBJ)SendMessageW(dialog, WM_GETFONT, 0, 0));
+            text = (draft->index == 4) ? L"+03:12" : L"25:00";
+            if (GetTextExtentPoint32W(draw->hDC, text, (int)wcslen(text), &measured) && measured.cx > box_w * 4 / 5) {
+                font_size = max(8, MulDiv(font_size, box_w * 4 / 5, measured.cx));
+                SelectObject(draw->hDC, old_font);
+                if (preview_font) DeleteObject(preview_font);
+                preview_font = CreateFontW(-font_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FIXED_PITCH, L"Consolas");
+                SelectObject(draw->hDC, preview_font ? (HGDIOBJ)preview_font : old_font);
+            }
+            DrawTextW(draw->hDC, text, -1, &draw->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             SelectObject(draw->hDC, old_font);
+            if (preview_font) DeleteObject(preview_font);
             return TRUE;
         }
         case WM_COMMAND:
