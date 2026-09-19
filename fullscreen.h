@@ -4,6 +4,7 @@
 #define ID_MENU_FULLSCREEN 348
 #define ID_MENU_COLOR_FIRST 349
 #define ID_MENU_COLOR_RESET 354
+#define ID_MENU_FULLSCREEN_SHOW_TEXT 355
 #define IDD_FULLSCREEN_COLORS 120
 #define IDC_FS_EDIT_FIRST 5100
 #define IDC_FS_PICK_FIRST 5110
@@ -25,6 +26,7 @@ typedef struct {
     wchar_t time[32];
     wchar_t status[96];
     int color;
+    int show_text;
 } FullscreenView;
 
 static HWND *fs_windows;
@@ -115,6 +117,7 @@ static void fs_read_view(FullscreenView *view) {
     }
     fs_format_time(view->time, 32, seconds, overtime);
     view->color = settings.fullscreen_colors[overtime ? 4 : fs_mode_color(mode)];
+    view->show_text = settings.fullscreen_show_text;
 }
 
 static void fs_refresh(void) {
@@ -193,16 +196,24 @@ static void fs_paint(HWND hwnd) {
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FIXED_PITCH, L"Consolas");
         SelectObject(dc, digits);
     }
-    line = bounds; line.top = (height - size) / 2 - size / 8; line.bottom = line.top + size * 3 / 2;
-    DrawTextW(dc, fs_view.time, -1, &line, DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
-    label_size = max(14, min(height / 32, width / 36));
-    label = CreateFontW(-label_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-    SelectObject(dc, label);
-    line.top = (height + size) / 2 + size / 8; line.bottom = line.top + label_size * 2;
-    DrawTextW(dc, fs_view.status, -1, &line, DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
+    if (settings.fullscreen_show_text) {
+        line = bounds; line.top = (height - size) / 2 - size / 8; line.bottom = line.top + size * 3 / 2;
+        DrawTextW(dc, fs_view.time, -1, &line, DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
+        label_size = max(14, min(height / 32, width / 36));
+        label = CreateFontW(-label_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+        SelectObject(dc, label);
+        line.top = (height + size) / 2 + size / 8; line.bottom = line.top + label_size * 2;
+        DrawTextW(dc, fs_view.status, -1, &line, DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, previous_font);
+        DeleteObject(label);
+    } else {
+        line = bounds;
+        DrawTextW(dc, fs_view.time, -1, &line, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, previous_font);
+    }
     BitBlt(target, 0, 0, width, height, dc, 0, 0, SRCCOPY);
-    SelectObject(dc, previous_font); DeleteObject(digits); DeleteObject(label);
+    DeleteObject(digits);
     SelectObject(dc, previous_bitmap); DeleteObject(bitmap); DeleteDC(dc);
     EndPaint(hwnd, &ps);
 }

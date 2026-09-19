@@ -310,6 +310,7 @@ typedef struct {
     int default_break_is_long;
     int enable_overtime_count_up;
     int fullscreen_colors[5];
+    int fullscreen_show_text;
 } TimerSettings;
 
 typedef enum {
@@ -1175,6 +1176,7 @@ static void reset_defaults_keep_data(void) {
     settings.default_break_is_long = 0;
     settings.enable_overtime_count_up = 1;
     memcpy(settings.fullscreen_colors, fs_default_colors, sizeof(fs_default_colors));
+    settings.fullscreen_show_text = 1;
 
     if (!is_running && !is_paused) {
         if (idle_mode == IDLE_POMODORO) {
@@ -2107,7 +2109,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.10");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.11");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -3155,6 +3157,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hOptionMenu, MF_STRING | (settings.enable_completion_sound ? MF_CHECKED : 0), ID_MENU_COMPLETION_SOUND, L"完成声音");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.show_completion_dialog ? MF_CHECKED : 0), 9, L"完成后弹窗");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.enable_overtime_count_up ? MF_CHECKED : 0), ID_MENU_ENABLE_OVERTIME, L"超时正计时");
+                AppendMenu(hOptionMenu, MF_STRING | (settings.fullscreen_show_text ? MF_CHECKED : 0), ID_MENU_FULLSCREEN_SHOW_TEXT, L"全屏显示文字");
                 AppendMenu(hOptionMenu, MF_STRING | (autostart_enabled ? MF_CHECKED : 0), 5, L"开机启动");
                 AppendMenu(hOptionMenu, MF_SEPARATOR, 0, NULL);
                 AppendMenu(hOptionMenu, MF_STRING | (settings.default_pomodoro_is_long ? MF_CHECKED : 0), ID_MENU_DEFAULT_LONG_POMODORO, L"默认：长番茄钟");
@@ -3210,6 +3213,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                     case ID_MENU_COLOR_RESET:
                         fs_save_palette(fs_default_colors);
+                        break;
+                    case ID_MENU_FULLSCREEN_SHOW_TEXT:
+                        settings.fullscreen_show_text = !settings.fullscreen_show_text;
+                        save_settings();
+                        if (fs_active) fs_refresh();
                         break;
                     case ID_MENU_START_CURRENT:
                         if (is_overtime) {
@@ -3706,6 +3714,7 @@ void load_settings() {
     settings.default_break_is_long = 0;
     settings.enable_overtime_count_up = 1;
     memcpy(settings.fullscreen_colors, fs_default_colors, sizeof(fs_default_colors));
+    settings.fullscreen_show_text = 1;
     pomodoro_count = 0;
     idle_mode = IDLE_POMODORO;
     idle_pomodoro_is_long = 1;
@@ -3736,6 +3745,7 @@ void load_settings() {
                     settings.fullscreen_colors[i] = rgb >= 0 && rgb <= 0xFFFFFF ? rgb : fs_default_colors[i];
                 }
             }
+            settings.fullscreen_show_text = extract_json_int(buf, "\"fullscreen_show_text\"", 1) ? 1 : 0;
             pomodoro_count = extract_json_int(buf, "\"pomodoro_count\"", pomodoro_count);
             idle_mode = (IdleMode)extract_json_int(buf, "\"idle_mode\"", (int)idle_mode);
             idle_pomodoro_is_long = extract_json_int(buf, "\"idle_pomodoro_is_long\"", idle_pomodoro_is_long);
@@ -3781,14 +3791,14 @@ int save_settings(void) {
 
     FILE* fp = _wfopen(g_settings_tmp_path, L"w");
     if (fp) {
-        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"enable_overtime_count_up\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d,\"fullscreen_focus_color\":%d,\"fullscreen_break_color\":%d,\"fullscreen_count_up_color\":%d,\"fullscreen_custom_color\":%d,\"fullscreen_overtime_color\":%d}",
+        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"enable_overtime_count_up\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d,\"fullscreen_focus_color\":%d,\"fullscreen_break_color\":%d,\"fullscreen_count_up_color\":%d,\"fullscreen_custom_color\":%d,\"fullscreen_overtime_color\":%d,\"fullscreen_show_text\":%d}",
             longDuration, longDuration, settings.long_pomodoro_count, settings.short_pomodoro_duration,
             settings.short_break_duration, settings.long_break_duration, settings.custom_duration,
             settings.adjust_block_minutes, settings.toast_auto_collapse_seconds, settings.enable_clock_sound,
             settings.enable_completion_sound, settings.show_completion_dialog, settings.default_pomodoro_is_long,
             settings.default_break_is_long, settings.enable_overtime_count_up, pomodoro_count, (int)idle_mode, idle_pomodoro_is_long, idle_break_is_long,
             settings.fullscreen_colors[0], settings.fullscreen_colors[1], settings.fullscreen_colors[2],
-            settings.fullscreen_colors[3], settings.fullscreen_colors[4]) >= 0;
+            settings.fullscreen_colors[3], settings.fullscreen_colors[4], settings.fullscreen_show_text) >= 0;
         if (writeOk && fflush(fp) != 0) writeOk = 0;
         if (fclose(fp) != 0) writeOk = 0;
 
