@@ -369,7 +369,7 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
     const wchar_t *digit_font = view->font[0] ? view->font : L"Segoe UI";
     const wchar_t *sig_font = view->signature_font[0] ? view->signature_font : L"KaiTi";
     int signature_height = 0, status_height = 0, total, top, current_y;
-    int time_status_gap, section_gap;
+    int gap;
     HFONT digits, label, signature = NULL;
     HGDIOBJ previous;
     SIZE measured;
@@ -417,12 +417,11 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
 
     has_status = (view->show_text && view->status[0]);
     status_height = has_status ? tm_label.tmHeight : 0;
-    time_status_gap = max(3, label_size / 3);
-    section_gap = max(8, is_portrait ? height / 35 : height / 30);
+    gap = max(8, is_portrait ? height / 35 : height / 30);
 
     total = tm_digits.tmAscent
-        + (status_height ? (time_status_gap + status_height) : 0)
-        + (signature_height ? (section_gap + signature_height) : 0);
+        + (status_height ? (gap + status_height) : 0)
+        + (signature_height ? (gap + signature_height) : 0);
     top = bounds.top + (height - total) / 2;
 
     line = bounds; line.top = top; line.bottom = top + tm_digits.tmHeight;
@@ -431,14 +430,14 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
 
     current_y = top + tm_digits.tmAscent;
     if (status_height) {
-        current_y += time_status_gap;
+        current_y += gap;
         line = bounds; line.top = current_y; line.bottom = current_y + status_height;
         SelectObject(dc, label);
         DrawTextW(dc, view->status, -1, &line, DT_CENTER | DT_NOPREFIX | DT_SINGLELINE);
         current_y = line.bottom;
     }
     if (signature_height) {
-        current_y += section_gap;
+        current_y += gap;
         line = bounds; line.top = current_y; line.bottom = current_y + signature_height;
         line.left = bounds.left + width / 10; line.right = bounds.right - width / 10;
         SelectObject(dc, signature);
