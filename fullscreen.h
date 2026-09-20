@@ -368,12 +368,15 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
     int signature_size = max(6, MulDiv(base_sig_size, sig_scale, 100));
     const wchar_t *digit_font = view->font[0] ? view->font : L"Segoe UI";
     const wchar_t *sig_font = view->signature_font[0] ? view->signature_font : L"KaiTi";
-    int gap = max(4, is_portrait ? height / 50 : height / 60), signature_height = 0, status_height = 0, total, top;
+    int signature_height = 0, status_height = 0, total, top, current_y;
+    int time_status_gap, section_gap;
     HFONT digits, label, signature = NULL;
     HGDIOBJ previous;
     SIZE measured;
+    TEXTMETRICW tm_digits, tm_label;
     RECT line, signature_rect;
     wchar_t wrapped[FS_SIGNATURE_CAPACITY * 2];
+    int has_status;
     if (width <= 0 || height <= 0) return;
     FillRect(dc, &bounds, (HBRUSH)GetStockObject(BLACK_BRUSH));
     SetBkMode(dc, TRANSPARENT);
@@ -389,7 +392,7 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, digit_font);
         SelectObject(dc, digits);
     }
-    GetTextExtentPoint32W(dc, view->time, (int)wcslen(view->time), &measured);
+    GetTextMetricsW(dc, &tm_digits);
     if (view->signature[0]) {
         /* Shrink long wrapped signatures to a bounded area above the HUD. */
         for (;;) {
@@ -409,19 +412,34 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
     if (view->signature[0]) label_size = min(label_size, max(1, signature_size * 5 / 6));
     label = CreateFontW(-label_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, digit_font);
-    if (view->show_text) status_height = label_size * 3 / 2;
-    total = measured.cy + (status_height ? gap + status_height : 0) + (signature_height ? gap + signature_height : 0);
+    SelectObject(dc, label);
+    GetTextMetricsW(dc, &tm_label);
+
+    has_status = (view->show_text && view->status[0]);
+    status_height = has_status ? tm_label.tmHeight : 0;
+    time_status_gap = max(3, label_size / 3);
+    section_gap = max(8, is_portrait ? height / 35 : height / 30);
+
+    total = tm_digits.tmAscent
+        + (status_height ? (time_status_gap + status_height) : 0)
+        + (signature_height ? (section_gap + signature_height) : 0);
     top = bounds.top + (height - total) / 2;
-    line = bounds; line.top = top; line.bottom = top + measured.cy;
+
+    line = bounds; line.top = top; line.bottom = top + tm_digits.tmHeight;
     SelectObject(dc, digits);
-    DrawTextW(dc, view->time, -1, &line, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    DrawTextW(dc, view->time, -1, &line, DT_CENTER | DT_NOPREFIX | DT_SINGLELINE);
+
+    current_y = top + tm_digits.tmAscent;
     if (status_height) {
-        line.top = line.bottom + gap; line.bottom = line.top + status_height;
+        current_y += time_status_gap;
+        line = bounds; line.top = current_y; line.bottom = current_y + status_height;
         SelectObject(dc, label);
-        DrawTextW(dc, view->status, -1, &line, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(dc, view->status, -1, &line, DT_CENTER | DT_NOPREFIX | DT_SINGLELINE);
+        current_y = line.bottom;
     }
     if (signature_height) {
-        line.top = line.bottom + gap; line.bottom = line.top + signature_height;
+        current_y += section_gap;
+        line = bounds; line.top = current_y; line.bottom = current_y + signature_height;
         line.left = bounds.left + width / 10; line.right = bounds.right - width / 10;
         SelectObject(dc, signature);
         SetTextColor(dc, fs_colorref(view->signature_color));
