@@ -21,10 +21,13 @@ try {
         Stop-Process -Id $process.Id -Force
         throw 'Integration harness timed out; only the test process was stopped.'
     }
-    Get-Content -LiteralPath (Join-Path $runPath 'results.txt')
+    $process.WaitForExit()
+    $results = Get-Content -LiteralPath (Join-Path $runPath 'results.txt')
+    $results
     Get-Content -LiteralPath (Join-Path $runPath 'errors.txt')
     Write-Host "Test artifacts: $projectRoot\$runPath"
-    if ($process.ExitCode -ne 0) { throw "Integration tests failed: $($process.ExitCode)" }
+    if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) { throw "Integration tests failed: $($process.ExitCode)" }
+    if (-not ($results -match 'FULLSCREEN_TEST: PASS \(0 failures\)')) { throw 'Integration tests failed.' }
 } finally {
     Pop-Location
 }

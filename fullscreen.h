@@ -128,6 +128,7 @@ static void fs_end_preview(void);
 
 /* Selection is session-only. Keep a device identity on each existing window. */
 typedef struct {
+    HMONITOR handle;
     MONITORINFOEXW info;
     wchar_t identity[128];
     wchar_t label[192];
@@ -177,6 +178,8 @@ static void fs_maintain_layer(int force_suppress);
 static void fs_start_guard(void);
 static void fs_stop_guard(void);
 static void fs_restore_hidden_windows(void);
+static HANDLE fs_enter_dpi(void);
+static void fs_leave_dpi(HANDLE previous);
 
 
 static COLORREF fs_colorref(int rgb) {
@@ -316,6 +319,7 @@ static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
     DWORD process_id;
     LONG ex_style;
     RECT rect;
+    HMONITOR window_mon;
     size_t i;
     (void)lParam;
 
@@ -328,14 +332,18 @@ static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
     if (process_id == GetCurrentProcessId()) return TRUE;
 
     if (!GetWindowRect(hwnd, &rect)) return TRUE;
-    if ((rect.right - rect.left) < 40 || (rect.bottom - rect.top) < 20) return TRUE;
+    if ((rect.right - rect.left) < 30 || (rect.bottom - rect.top) < 20) return TRUE;
+
+    window_mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
 
     for (i = 0; i < fs_count; ++i) {
         FullscreenMonitor *item = (FullscreenMonitor *)GetWindowLongPtrW(fs_windows[i], GWLP_USERDATA);
         if (item) {
+            if (window_mon && item->handle && window_mon != item->handle) continue;
+
             RECT intersection, mon_rect = item->info.rcMonitor;
             if (IntersectRect(&intersection, &rect, &mon_rect)) {
-                if ((intersection.right - intersection.left) >= 40 &&
+                if ((intersection.right - intersection.left) >= 30 &&
                     (intersection.bottom - intersection.top) >= 20) {
                     ShowWindow(hwnd, SW_HIDE);
                     fs_record_hidden_window(hwnd);
@@ -348,8 +356,11 @@ static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
 }
 
 static void fs_suppress_competing_windows(void) {
+    HANDLE previous;
     if (!fs_count) return;
+    previous = fs_enter_dpi();
     EnumWindows(fs_suppress_enum_proc, 0);
+    fs_leave_dpi(previous);
 }
 
 static void fs_restore_hidden_windows(void) {
@@ -735,6 +746,7 @@ static BOOL CALLBACK fs_collect_monitor(HMONITOR monitor, HDC dc, LPRECT rect, L
     if (list->count == FS_MAX_MONITORS) return FALSE;
     item = &list->items[list->count];
     memset(item, 0, sizeof(*item));
+    item->handle = monitor;
     item->info.cbSize = sizeof(item->info);
     if (!GetMonitorInfoW(monitor, (MONITORINFO *)&item->info)) return FALSE;
     if (EnumDisplayDevicesW(item->info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME) && device.DeviceID[0])
