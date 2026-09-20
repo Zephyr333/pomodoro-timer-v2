@@ -354,17 +354,21 @@ static void fs_draw_signature_text(HDC dc, const wchar_t *text, RECT rect) {
 /* Shared by the real windows and the dialog preview, including line wrapping. */
 static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hud) {
     int width = bounds.right - bounds.left, height = bounds.bottom - bounds.top;
-    int base_size = max(8, min(height / 4, width / 6));
+    int is_portrait = height > width;
+    int base_size = is_portrait ? max(8, min(height / 5, width * 10 / 35))
+                                : max(8, min(height / 4, width / 6));
     int scale = view->scale > 0 ? view->scale : 100;
     int size = max(8, MulDiv(base_size, scale, 100));
-    int base_label_size = max(7, min(height / 32, width / 36));
+    int base_label_size = is_portrait ? max(7, min(height / 32, base_size / 8))
+                                      : max(7, min(height / 32, width / 36));
     int label_size = max(6, MulDiv(base_label_size, scale, 100));
-    int base_sig_size = max(base_label_size + 2, MulDiv(base_label_size, 42, 25));
+    int base_sig_size = is_portrait ? max(base_label_size + 2, base_size * 20 / 100)
+                                    : max(base_label_size + 2, MulDiv(base_label_size, 42, 25));
     int sig_scale = view->signature_scale > 0 ? view->signature_scale : 100;
     int signature_size = max(6, MulDiv(base_sig_size, sig_scale, 100));
     const wchar_t *digit_font = view->font[0] ? view->font : L"Segoe UI";
     const wchar_t *sig_font = view->signature_font[0] ? view->signature_font : L"KaiTi";
-    int gap = max(4, height / 60), signature_height = 0, status_height = 0, total, top;
+    int gap = max(4, is_portrait ? height / 50 : height / 60), signature_height = 0, status_height = 0, total, top;
     HFONT digits, label, signature = NULL;
     HGDIOBJ previous;
     SIZE measured;
