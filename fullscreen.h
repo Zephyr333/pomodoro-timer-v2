@@ -145,6 +145,31 @@ static FullscreenView fs_view;
 static int fs_hud_visible;
 static POINT fs_last_cursor;
 
+#ifndef EVENT_SYSTEM_FOREGROUND
+#define EVENT_SYSTEM_FOREGROUND 0x0003
+#endif
+#ifndef EVENT_OBJECT_SHOW
+#define EVENT_OBJECT_SHOW 0x8002
+#endif
+#ifndef WINEVENT_OUTOFCONTEXT
+#define WINEVENT_OUTOFCONTEXT 0x0000
+#endif
+#ifndef WINEVENT_SKIPOWNPROCESS
+#define WINEVENT_SKIPOWNPROCESS 0x0002
+#endif
+
+static HWINEVENTHOOK fs_foreground_hook;
+static HWINEVENTHOOK fs_show_hook;
+static HWND *fs_hidden_windows;
+static size_t fs_hidden_count;
+static size_t fs_hidden_capacity;
+static DWORD fs_last_suppress_tick;
+
+static void fs_maintain_layer(int force_suppress);
+static void fs_start_guard(void);
+static void fs_stop_guard(void);
+static void fs_restore_hidden_windows(void);
+
 static COLORREF fs_colorref(int rgb) {
     return RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
 }
@@ -239,6 +264,7 @@ static void fs_refresh(void) {
     FullscreenView next;
     size_t i;
     if (!fs_active) return;
+    fs_maintain_layer(0);
     if (is_running || is_paused) fs_completed_mode = TIMER_NONE;
     fs_read_view(&next);
     if (memcmp(&next, &fs_view, sizeof(next)) == 0) return;
@@ -252,8 +278,133 @@ static void fs_refresh(void) {
     }
 }
 
+static void fs_enforce_topmost(void) {
+    size_t i;
+    for (i = 0; i < fs_count; ++i) {
+        if (fs_windows[i] && IsWindow(fs_windows[i])) {
+            SetWindowPos(fs_windows[i], HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+}
+
+static void fs_record_hidden_window(HWND hwnd) {
+    size_t i;
+    for (i = 0; i < fs_hidden_count; ++i) {
+        if (fs_hidden_windows[i] == hwnd) return;
+    }
+    if (fs_hidden_count >= fs_hidden_capacity) {
+        size_t new_cap = fs_hidden_capacity ? fs_hidden_capacity * 2 : 16;
+        HWND *next = (HWND *)realloc(fs_hidden_windows, new_cap * sizeof(HWND));
+        if (!next) return;
+        fs_hidden_windows = next;
+        fs_hidden_capacity = new_cap;
+    }
+    fs_hidden_windows[fs_hidden_count++] = hwnd;
+}
+
+static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
+    DWORD process_id;
+    LONG ex_style;
+    RECT rect;
+    size_t i;
+    (void)lParam;
+
+    if (!hwnd || !IsWindowVisible(hwnd)) return TRUE;
+
+    ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    if (!(ex_style & WS_EX_TOPMOST)) return TRUE;
+
+    GetWindowThreadProcessId(hwnd, &process_id);
+    if (process_id == GetCurrentProcessId()) return TRUE;
+
+    if (!GetWindowRect(hwnd, &rect)) return TRUE;
+    if ((rect.right - rect.left) < 40 || (rect.bottom - rect.top) < 20) return TRUE;
+
+    for (i = 0; i < fs_count; ++i) {
+        FullscreenMonitor *item = (FullscreenMonitor *)GetWindowLongPtrW(fs_windows[i], GWLP_USERDATA);
+        if (item) {
+            RECT intersection, mon_rect = item->info.rcMonitor;
+            if (IntersectRect(&intersection, &rect, &mon_rect)) {
+                ShowWindow(hwnd, SW_HIDE);
+                fs_record_hidden_window(hwnd);
+                break;
+            }
+        }
+    }
+    return TRUE;
+}
+
+static void fs_suppress_competing_windows(void) {
+    if (!fs_count) return;
+    EnumWindows(fs_suppress_enum_proc, 0);
+}
+
+static void fs_restore_hidden_windows(void) {
+    size_t i;
+    for (i = 0; i < fs_hidden_count; ++i) {
+        if (IsWindow(fs_hidden_windows[i])) {
+            ShowWindow(fs_hidden_windows[i], SW_SHOW);
+        }
+    }
+    free(fs_hidden_windows);
+    fs_hidden_windows = NULL;
+    fs_hidden_count = 0;
+    fs_hidden_capacity = 0;
+}
+
+static void fs_maintain_layer(int force_suppress) {
+    DWORD now;
+    if (!fs_active || !fs_count) return;
+    fs_enforce_topmost();
+    now = GetTickCount();
+    if (force_suppress || (now - fs_last_suppress_tick >= 250)) {
+        fs_suppress_competing_windows();
+        fs_last_suppress_tick = now;
+    }
+}
+
+static void CALLBACK fs_winevent_proc(HWINEVENTHOOK hook, DWORD event, HWND hwnd,
+    LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
+    (void)hook; (void)event; (void)hwnd; (void)idObject; (void)idChild;
+    (void)dwEventThread; (void)dwmsEventTime;
+    if (fs_active && fs_count) {
+        fs_maintain_layer(1);
+    }
+}
+
+static void fs_start_guard(void) {
+    if (!fs_foreground_hook) {
+        fs_foreground_hook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+            NULL, fs_winevent_proc, 0, 0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    }
+    if (!fs_show_hook) {
+        fs_show_hook = SetWinEventHook(
+            EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
+            NULL, fs_winevent_proc, 0, 0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    }
+    fs_last_suppress_tick = 0;
+    fs_maintain_layer(1);
+}
+
+static void fs_stop_guard(void) {
+    if (fs_foreground_hook) {
+        UnhookWinEvent(fs_foreground_hook);
+        fs_foreground_hook = NULL;
+    }
+    if (fs_show_hook) {
+        UnhookWinEvent(fs_show_hook);
+        fs_show_hook = NULL;
+    }
+    fs_restore_hidden_windows();
+}
+
 static void fs_destroy_windows(void) {
     size_t i;
+    fs_stop_guard();
     if (fs_count > 0) KillTimer(fs_windows[0], ID_FS_HUD_TIMER);
     for (i = 0; i < fs_count; ++i) DestroyWindow(fs_windows[i]);
     free(fs_windows);
@@ -612,6 +763,9 @@ static void fs_remove_window(size_t index) {
     memmove(fs_windows + index, fs_windows + index + 1, (fs_count - index - 1) * sizeof(HWND));
     --fs_count;
     DestroyWindow(removed);
+    fs_restore_hidden_windows();
+    if (fs_count) fs_maintain_layer(1);
+    else fs_stop_guard();
     if (fs_count && fs_hud_visible) SetTimer(fs_windows[0], ID_FS_HUD_TIMER, 1500, NULL);
     if (had_focus && fs_count) { SetForegroundWindow(fs_windows[0]); SetFocus(fs_windows[0]); }
 }
@@ -633,6 +787,7 @@ static int fs_begin(void) {
     close_toast_notification_if_open();
     fs_read_view(&fs_view);
     if (!SetTimer(g_main_hwnd, ID_FS_REFRESH, 100, NULL)) { fs_exit(); return 0; }
+    fs_start_guard();
     return 1;
 }
 static int fs_add_screen(const FullscreenMonitor *item) {
@@ -658,6 +813,7 @@ static int fs_add_screen(const FullscreenMonitor *item) {
     ShowWindow(window, SW_SHOWNOACTIVATE);
     InvalidateRect(window, NULL, FALSE);
     UpdateWindow(window);
+    fs_maintain_layer(1);
     return 1;
 }
 /* Reconcile only selected, still-connected devices; never add newly connected screens. */
