@@ -166,12 +166,17 @@ static POINT fs_last_cursor;
 #endif
 
 static HWINEVENTHOOK fs_foreground_hook;
+static HWND *fs_hidden_windows;
+static size_t fs_hidden_count;
+static size_t fs_hidden_capacity;
+static DWORD fs_last_suppress_tick;
 static DWORD fs_last_topmost_tick;
 static volatile LONG fs_maintain_scheduled;
 
-static void fs_maintain_layer(int force_topmost);
+static void fs_maintain_layer(int force_suppress);
 static void fs_start_guard(void);
 static void fs_stop_guard(void);
+static void fs_restore_hidden_windows(void);
 
 
 static COLORREF fs_colorref(int rgb) {
@@ -292,13 +297,85 @@ static void fs_enforce_topmost(void) {
     }
 }
 
-static void fs_maintain_layer(int force_topmost) {
+static void fs_record_hidden_window(HWND hwnd) {
+    size_t i;
+    for (i = 0; i < fs_hidden_count; ++i) {
+        if (fs_hidden_windows[i] == hwnd) return;
+    }
+    if (fs_hidden_count >= fs_hidden_capacity) {
+        size_t new_cap = fs_hidden_capacity ? fs_hidden_capacity * 2 : 16;
+        HWND *next = (HWND *)realloc(fs_hidden_windows, new_cap * sizeof(HWND));
+        if (!next) return;
+        fs_hidden_windows = next;
+        fs_hidden_capacity = new_cap;
+    }
+    fs_hidden_windows[fs_hidden_count++] = hwnd;
+}
+
+static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
+    DWORD process_id;
+    LONG ex_style;
+    RECT rect;
+    size_t i;
+    (void)lParam;
+
+    if (!hwnd || !IsWindowVisible(hwnd)) return TRUE;
+
+    ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    if (!(ex_style & WS_EX_TOPMOST)) return TRUE;
+
+    GetWindowThreadProcessId(hwnd, &process_id);
+    if (process_id == GetCurrentProcessId()) return TRUE;
+
+    if (!GetWindowRect(hwnd, &rect)) return TRUE;
+    if ((rect.right - rect.left) < 40 || (rect.bottom - rect.top) < 20) return TRUE;
+
+    for (i = 0; i < fs_count; ++i) {
+        FullscreenMonitor *item = (FullscreenMonitor *)GetWindowLongPtrW(fs_windows[i], GWLP_USERDATA);
+        if (item) {
+            RECT intersection, mon_rect = item->info.rcMonitor;
+            if (IntersectRect(&intersection, &rect, &mon_rect)) {
+                if ((intersection.right - intersection.left) >= 40 &&
+                    (intersection.bottom - intersection.top) >= 20) {
+                    ShowWindow(hwnd, SW_HIDE);
+                    fs_record_hidden_window(hwnd);
+                    break;
+                }
+            }
+        }
+    }
+    return TRUE;
+}
+
+static void fs_suppress_competing_windows(void) {
+    if (!fs_count) return;
+    EnumWindows(fs_suppress_enum_proc, 0);
+}
+
+static void fs_restore_hidden_windows(void) {
+    size_t i;
+    for (i = 0; i < fs_hidden_count; ++i) {
+        if (IsWindow(fs_hidden_windows[i])) {
+            ShowWindow(fs_hidden_windows[i], SW_SHOW);
+        }
+    }
+    free(fs_hidden_windows);
+    fs_hidden_windows = NULL;
+    fs_hidden_count = 0;
+    fs_hidden_capacity = 0;
+}
+
+static void fs_maintain_layer(int force_suppress) {
     DWORD now;
     if (!fs_active || !fs_count) return;
     now = GetTickCount();
-    if (force_topmost || (now - fs_last_topmost_tick >= 250)) {
+    if (force_suppress || (now - fs_last_topmost_tick >= 250)) {
         fs_enforce_topmost();
         fs_last_topmost_tick = now;
+    }
+    if (force_suppress || (now - fs_last_suppress_tick >= 300)) {
+        fs_suppress_competing_windows();
+        fs_last_suppress_tick = now;
     }
 }
 
@@ -322,6 +399,7 @@ static void fs_start_guard(void) {
             NULL, fs_winevent_proc, 0, 0,
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     }
+    fs_last_suppress_tick = 0;
     fs_last_topmost_tick = 0;
     fs_maintain_scheduled = 0;
     fs_maintain_layer(1);
@@ -333,6 +411,7 @@ static void fs_stop_guard(void) {
         fs_foreground_hook = NULL;
     }
     fs_maintain_scheduled = 0;
+    fs_restore_hidden_windows();
 }
 
 static void fs_destroy_windows(void) {
@@ -696,6 +775,7 @@ static void fs_remove_window(size_t index) {
     memmove(fs_windows + index, fs_windows + index + 1, (fs_count - index - 1) * sizeof(HWND));
     --fs_count;
     DestroyWindow(removed);
+    fs_restore_hidden_windows();
     if (fs_count) fs_maintain_layer(1);
     else fs_stop_guard();
     if (fs_count && fs_hud_visible) SetTimer(fs_windows[0], ID_FS_HUD_TIMER, 1500, NULL);
