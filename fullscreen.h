@@ -369,7 +369,7 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
     const wchar_t *digit_font = view->font[0] ? view->font : L"Segoe UI";
     const wchar_t *sig_font = view->signature_font[0] ? view->signature_font : L"KaiTi";
     int signature_height = 0, status_height = 0, total, top, current_y;
-    int gap;
+    int gap, time_gap;
     HFONT digits, label, signature = NULL;
     HGDIOBJ previous;
     SIZE measured;
@@ -418,9 +418,10 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
     has_status = (view->show_text && view->status[0]);
     status_height = has_status ? tm_label.tmHeight : 0;
     gap = max(8, is_portrait ? height / 35 : height / 30);
+    time_gap = MulDiv(gap, 122, 100);
 
     total = tm_digits.tmAscent
-        + (status_height ? (gap + status_height) : 0)
+        + (status_height ? (time_gap + status_height) : 0)
         + (signature_height ? (gap + signature_height) : 0);
     top = bounds.top + (height - total) / 2;
 
@@ -430,7 +431,7 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
 
     current_y = top + tm_digits.tmAscent;
     if (status_height) {
-        current_y += gap;
+        current_y += time_gap;
         line = bounds; line.top = current_y; line.bottom = current_y + status_height;
         SelectObject(dc, label);
         DrawTextW(dc, view->status, -1, &line, DT_CENTER | DT_NOPREFIX | DT_SINGLELINE);
