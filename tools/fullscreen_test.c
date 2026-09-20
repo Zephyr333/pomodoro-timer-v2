@@ -488,6 +488,18 @@ static void test_monitor_ordering(void) {
     CHECK(!wcscmp(monitors[0].info.szDevice, L"\\\\.\\DISPLAY_LEFT"), "spatial order: left screen is first");
     CHECK(!wcscmp(monitors[1].info.szDevice, L"\\\\.\\DISPLAY_RIGHT_TOP"), "spatial order: top-right screen is second");
     CHECK(!wcscmp(monitors[2].info.szDevice, L"\\\\.\\DISPLAY_RIGHT_BOT"), "spatial order: bottom-right screen is third");
+
+    /* Test 4: Live monitor sequential labeling check */
+    {
+        FullscreenMonitors live_list;
+        size_t idx;
+        fs_get_monitors(&live_list);
+        for (idx = 0; idx < live_list.count; ++idx) {
+            wchar_t expected[32];
+            swprintf(expected, 32, L"屏幕 %zu ·", idx + 1);
+            CHECK(wcsstr(live_list.items[idx].label, expected) == live_list.items[idx].label, "monitors are sequentially labeled 屏幕 1, 屏幕 2...");
+        }
+    }
 }
 static void test_signature(void) {
     FullscreenView view;

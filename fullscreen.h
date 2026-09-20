@@ -759,7 +759,6 @@ static BOOL CALLBACK fs_collect_monitor(HMONITOR monitor, HDC dc, LPRECT rect, L
     FullscreenMonitors *list = (FullscreenMonitors *)value;
     FullscreenMonitor *item;
     DISPLAY_DEVICEW device = {sizeof(device)};
-    const wchar_t *number;
     (void)dc; (void)rect;
     if (list->count == FS_MAX_MONITORS) return FALSE;
     item = &list->items[list->count];
@@ -770,9 +769,7 @@ static BOOL CALLBACK fs_collect_monitor(HMONITOR monitor, HDC dc, LPRECT rect, L
     if (EnumDisplayDevicesW(item->info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME) && device.DeviceID[0])
         wcsncpy(item->identity, device.DeviceID, 127);
     else wcscpy(item->identity, item->info.szDevice);
-    number = wcsstr(item->info.szDevice, L"DISPLAY");
-    number = number ? number + 7 : item->info.szDevice;
-    swprintf(item->label, 192, L"屏幕 %ls · %ld × %ld", number,
+    swprintf(item->label, 192, L"屏幕 %zu · %ld × %ld", (size_t)(list->count + 1),
         item->info.rcMonitor.right - item->info.rcMonitor.left,
         item->info.rcMonitor.bottom - item->info.rcMonitor.top);
     ++list->count;
@@ -809,10 +806,16 @@ static int fs_monitor_order(const void *a, const void *b) {
 static int fs_get_monitors(FullscreenMonitors *list) {
     HANDLE previous = fs_enter_dpi();
     BOOL ok;
+    size_t i;
     memset(list, 0, sizeof(*list));
     ok = EnumDisplayMonitors(NULL, NULL, fs_collect_monitor, (LPARAM)list);
     fs_leave_dpi(previous);
     qsort(list->items, list->count, sizeof(list->items[0]), fs_monitor_order);
+    for (i = 0; i < list->count; ++i) {
+        swprintf(list->items[i].label, 192, L"屏幕 %zu · %ld × %ld", i + 1,
+            list->items[i].info.rcMonitor.right - list->items[i].info.rcMonitor.left,
+            list->items[i].info.rcMonitor.bottom - list->items[i].info.rcMonitor.top);
+    }
     return ok;
 }
 static int fs_window_index(const wchar_t *identity) {
