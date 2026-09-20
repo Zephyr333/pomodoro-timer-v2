@@ -10,7 +10,7 @@ try {
     $vcvars = Join-Path $vsInstall 'VC\Auxiliary\Build\vcvars64.bat'
     $runPath = 'tools\.fullscreen-test\' + (Get-Date -Format 'yyyyMMdd-HHmmss')
     New-Item -ItemType Directory -Path $runPath -Force | Out-Null
-    $build = 'call "' + $vcvars + '" >nul && rc.exe /nologo /fo "' + $runPath + '\test.res" pomodoro-timer.rc && cl.exe /nologo /utf-8 /D_WIN32_WINNT=0x0600 /D_CRT_SECURE_NO_WARNINGS /W4 /O2 /Fe:"' + $runPath + '\fullscreen_test.exe" /Fo:"' + $runPath + '\test.obj" tools\fullscreen_test.c "' + $runPath + '\test.res" /link user32.lib advapi32.lib winmm.lib shell32.lib ole32.lib gdi32.lib comdlg32.lib'
+    $build = 'call "' + $vcvars + '" >nul && rc.exe /nologo /DNO_MANIFEST /fo "' + $runPath + '\test.res" pomodoro-timer.rc && cl.exe /nologo /utf-8 /D_WIN32_WINNT=0x0600 /D_CRT_SECURE_NO_WARNINGS /W4 /O2 /Fe:"' + $runPath + '\fullscreen_test.exe" /Fo:"' + $runPath + '\test.obj" tools\fullscreen_test.c "' + $runPath + '\test.res" /link user32.lib advapi32.lib winmm.lib shell32.lib ole32.lib gdi32.lib comdlg32.lib'
     & cmd.exe /d /s /c $build
     if ($LASTEXITCODE -ne 0) { throw 'Integration harness build failed.' }
     $testArgs = @($runPath)
