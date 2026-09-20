@@ -167,6 +167,7 @@ static POINT fs_last_cursor;
 #endif
 
 static HWINEVENTHOOK fs_foreground_hook;
+static HWINEVENTHOOK fs_show_hook;
 static HWND *fs_hidden_windows;
 static size_t fs_hidden_count;
 static size_t fs_hidden_capacity;
@@ -319,7 +320,7 @@ static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
     DWORD process_id;
     LONG ex_style;
     RECT rect;
-    HMONITOR window_mon;
+    POINT center;
     size_t i;
     (void)lParam;
 
@@ -334,21 +335,17 @@ static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
     if (!GetWindowRect(hwnd, &rect)) return TRUE;
     if ((rect.right - rect.left) < 30 || (rect.bottom - rect.top) < 20) return TRUE;
 
-    window_mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    center.x = (rect.left + rect.right) / 2;
+    center.y = (rect.top + rect.bottom) / 2;
 
     for (i = 0; i < fs_count; ++i) {
         FullscreenMonitor *item = (FullscreenMonitor *)GetWindowLongPtrW(fs_windows[i], GWLP_USERDATA);
         if (item) {
-            if (window_mon && item->handle && window_mon != item->handle) continue;
-
-            RECT intersection, mon_rect = item->info.rcMonitor;
-            if (IntersectRect(&intersection, &rect, &mon_rect)) {
-                if ((intersection.right - intersection.left) >= 30 &&
-                    (intersection.bottom - intersection.top) >= 20) {
-                    ShowWindow(hwnd, SW_HIDE);
-                    fs_record_hidden_window(hwnd);
-                    break;
-                }
+            RECT mon_rect = item->info.rcMonitor;
+            if (PtInRect(&mon_rect, center)) {
+                ShowWindow(hwnd, SW_HIDE);
+                fs_record_hidden_window(hwnd);
+                break;
             }
         }
     }
@@ -410,6 +407,12 @@ static void fs_start_guard(void) {
             NULL, fs_winevent_proc, 0, 0,
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     }
+    if (!fs_show_hook) {
+        fs_show_hook = SetWinEventHook(
+            EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
+            NULL, fs_winevent_proc, 0, 0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    }
     fs_last_suppress_tick = 0;
     fs_last_topmost_tick = 0;
     fs_maintain_scheduled = 0;
@@ -420,6 +423,10 @@ static void fs_stop_guard(void) {
     if (fs_foreground_hook) {
         UnhookWinEvent(fs_foreground_hook);
         fs_foreground_hook = NULL;
+    }
+    if (fs_show_hook) {
+        UnhookWinEvent(fs_show_hook);
+        fs_show_hook = NULL;
     }
     fs_maintain_scheduled = 0;
     fs_restore_hidden_windows();
