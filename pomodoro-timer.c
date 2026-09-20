@@ -293,6 +293,8 @@ static LANG *g_lang = &lang_en;
 static HMENU g_hLangMenu = NULL;
 static HMENU g_hMenu = NULL;
 
+#define FS_SIGNATURE_CAPACITY 501
+#define FS_COLOR_COUNT 6
 // Timer settings structure
 typedef struct {
     int long_pomodoro_duration;
@@ -309,8 +311,12 @@ typedef struct {
     int default_pomodoro_is_long;
     int default_break_is_long;
     int enable_overtime_count_up;
-    int fullscreen_colors[5];
+    int fullscreen_colors[FS_COLOR_COUNT];
+    int fullscreen_scales[FS_COLOR_COUNT];
+    wchar_t fullscreen_fonts[FS_COLOR_COUNT][32];
     int fullscreen_show_text;
+    int fullscreen_show_signature;
+    wchar_t fullscreen_signature[FS_SIGNATURE_CAPACITY];
 } TimerSettings;
 
 typedef enum {
@@ -1176,7 +1182,14 @@ static void reset_defaults_keep_data(void) {
     settings.default_break_is_long = 0;
     settings.enable_overtime_count_up = 1;
     memcpy(settings.fullscreen_colors, fs_default_colors, sizeof(fs_default_colors));
+    memcpy(settings.fullscreen_scales, fs_default_scales, sizeof(fs_default_scales));
+    {
+        int i;
+        for (i = 0; i < FS_COLOR_COUNT; ++i) wcscpy(settings.fullscreen_fonts[i], fs_default_fonts[i]);
+    }
     settings.fullscreen_show_text = 1;
+    settings.fullscreen_show_signature = 1;
+    settings.fullscreen_signature[0] = 0;
 
     if (!is_running && !is_paused) {
         if (idle_mode == IDLE_POMODORO) {
@@ -3105,12 +3118,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     start_current_idle_mode(hwnd);
                 }
             } else if (LOWORD(lParam) == WM_MBUTTONUP) {
-                fs_toggle();
+                fs_show_all();
             } else if (LOWORD(lParam) == WM_RBUTTONUP) {
                 // Right click: show context menu
                 HMENU hMenu = CreatePopupMenu();
                 HMENU hStartMenu = CreatePopupMenu();
                 HMENU hControlMenu = CreatePopupMenu();
+                HMENU hFullscreenMenu = fs_create_menu();
                 HMENU hAdjustMenu = CreatePopupMenu();
                 HMENU hDurationMenu = CreatePopupMenu();
                 HMENU hOptionMenu = CreatePopupMenu();
@@ -3125,8 +3139,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hControlMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_PAUSE_RESUME,
                     is_running ? L"暂停" : L"继续");
                 AppendMenu(hControlMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_STOP, L"结束");
-                AppendMenu(hControlMenu, MF_SEPARATOR, 0, NULL);
-                AppendMenu(hControlMenu, MF_STRING | (fs_active ? MF_CHECKED : 0), ID_MENU_FULLSCREEN, L"全屏");
 
                 AppendMenu(hStartMenu, MF_STRING, 1, L"开始长番茄钟");
                 AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_SHORT_POMODORO, L"开始短番茄钟");
@@ -3157,7 +3169,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hOptionMenu, MF_STRING | (settings.enable_completion_sound ? MF_CHECKED : 0), ID_MENU_COMPLETION_SOUND, L"完成声音");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.show_completion_dialog ? MF_CHECKED : 0), 9, L"完成后弹窗");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.enable_overtime_count_up ? MF_CHECKED : 0), ID_MENU_ENABLE_OVERTIME, L"超时正计时");
-                AppendMenu(hOptionMenu, MF_STRING | (settings.fullscreen_show_text ? MF_CHECKED : 0), ID_MENU_FULLSCREEN_SHOW_TEXT, L"全屏显示文字");
                 AppendMenu(hOptionMenu, MF_STRING | (autostart_enabled ? MF_CHECKED : 0), 5, L"开机启动");
                 AppendMenu(hOptionMenu, MF_SEPARATOR, 0, NULL);
                 AppendMenu(hOptionMenu, MF_STRING | (settings.default_pomodoro_is_long ? MF_CHECKED : 0), ID_MENU_DEFAULT_LONG_POMODORO, L"默认：长番茄钟");
@@ -3183,12 +3194,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hControlMenu, L"会话");
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hStartMenu, L"切换");
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hIdleMenu, L"待机");
+                AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFullscreenMenu, L"全屏");
+                AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hColorMenu, L"预览");
+                AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hAdjustMenu, L"调整");
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hDurationMenu, L"时长");
-                AppendMenu(hMenu, MF_POPUP | ((is_running || is_paused) ? MF_GRAYED : 0), (UINT_PTR)hDataOpsMenu, L"操作");
-                AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hColorMenu, L"颜色");
-                AppendMenu(hMenu, MF_POPUP | ((is_running || is_paused) ? MF_GRAYED : 0), (UINT_PTR)hDataStoreMenu, L"存储");
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hOptionMenu, L"偏好");
+                AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenu(hMenu, MF_POPUP | ((is_running || is_paused) ? MF_GRAYED : 0), (UINT_PTR)hDataStoreMenu, L"存储");
+                AppendMenu(hMenu, MF_POPUP | ((is_running || is_paused) ? MF_GRAYED : 0), (UINT_PTR)hDataOpsMenu, L"备份");
                 AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
                 AppendMenu(hMenu, MF_STRING, ID_MENU_REPORT, L"统计");
                 AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
@@ -3200,9 +3215,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, NULL);
 
                 // Handle menu commands
+                if (cmd >= ID_MENU_SCREEN_FIRST && cmd < ID_MENU_SCREEN_FIRST + FS_MAX_MONITORS)
+                    fs_toggle_screen((size_t)(cmd - ID_MENU_SCREEN_FIRST));
                 switch (cmd) {
                     case ID_MENU_FULLSCREEN:
-                        fs_toggle();
+                        fs_show_all();
+                        break;
+                    case ID_MENU_FULLSCREEN_EXIT:
+                        fs_exit();
+                        break;
+                    case ID_MENU_FULLSCREEN_SIGNATURE:
+                        fs_show_signature(hwnd);
                         break;
                     case ID_MENU_COLOR_FIRST:
                     case ID_MENU_COLOR_FIRST + 1:
@@ -3211,12 +3234,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     case ID_MENU_COLOR_FIRST + 4:
                         fs_show_color(hwnd, cmd - ID_MENU_COLOR_FIRST);
                         break;
+                    case ID_MENU_SIGNATURE_COLOR:
+                        fs_show_color(hwnd, 5);
+                        break;
+                    case ID_MENU_FULLSCREEN_SHOW_SIGNATURE:
+                        settings.fullscreen_show_signature = !settings.fullscreen_show_signature;
+                        if (!save_settings()) settings.fullscreen_show_signature = !settings.fullscreen_show_signature;
+                        fs_refresh();
+                        break;
                     case ID_MENU_COLOR_RESET:
                         fs_save_palette(fs_default_colors);
                         break;
                     case ID_MENU_FULLSCREEN_SHOW_TEXT:
                         settings.fullscreen_show_text = !settings.fullscreen_show_text;
-                        save_settings();
+                        if (!save_settings()) settings.fullscreen_show_text = !settings.fullscreen_show_text;
                         if (fs_active) fs_refresh();
                         break;
                     case ID_MENU_START_CURRENT:
@@ -3591,6 +3622,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                 }
                 DestroyMenu(hMenu);
+                g_hMenu = NULL;
+                if (fs_active && fs_count) {
+                    SetForegroundWindow(fs_windows[0]);
+                    SetFocus(fs_windows[0]);
+                }
             }
             break;
         case WM_FS_COMPLETED:
@@ -3639,29 +3675,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 // Load settings from file
+#include "settings_json.h"
 static int extract_json_int(const char* buf, const char* key, int defaultValue) {
-    const char* pos = strstr(buf, key);
+    const char *pos = settings_json_find(buf, key);
     int value;
-    if (!pos) return defaultValue;
-    pos = strchr(pos, ':');
-    if (!pos) return defaultValue;
-    if (sscanf(pos + 1, "%d", &value) == 1) return value;
-    return defaultValue;
+    return pos && settings_json_number(&pos, &value) ? value : defaultValue;
 }
 
 static int read_settings_json_buffer(char* buf, size_t bufSize) {
     FILE* fp;
     size_t n;
+    int complete;
     if (!buf || bufSize == 0) return 0;
     buf[0] = '\0';
 
     fp = _wfopen(g_settings_path, L"r");
     if (fp) {
         n = fread(buf, 1, bufSize - 1, fp);
+        complete = fgetc(fp) == EOF && !ferror(fp);
         fclose(fp);
-        if (n > 0) {
+        if (n > 0 && complete) {
             buf[n] = '\0';
-            if (strstr(buf, "\"pomodoro_duration\"") && strstr(buf, "\"pomodoro_count\"")) {
+            if (settings_json_valid(buf)) {
                 return 1;
             }
         }
@@ -3670,10 +3705,11 @@ static int read_settings_json_buffer(char* buf, size_t bufSize) {
     fp = _wfopen(g_settings_tmp_path, L"r");
     if (fp) {
         n = fread(buf, 1, bufSize - 1, fp);
+        complete = fgetc(fp) == EOF && !ferror(fp);
         fclose(fp);
-        if (n > 0) {
+        if (n > 0 && complete) {
             buf[n] = '\0';
-            if (strstr(buf, "\"pomodoro_duration\"") && strstr(buf, "\"pomodoro_count\"")) {
+            if (settings_json_valid(buf)) {
                 MoveFileExW(g_settings_tmp_path, g_settings_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
                 return 1;
             }
@@ -3683,10 +3719,11 @@ static int read_settings_json_buffer(char* buf, size_t bufSize) {
     fp = _wfopen(g_settings_bak_path, L"r");
     if (fp) {
         n = fread(buf, 1, bufSize - 1, fp);
+        complete = fgetc(fp) == EOF && !ferror(fp);
         fclose(fp);
-        if (n > 0) {
+        if (n > 0 && complete) {
             buf[n] = '\0';
-            if (strstr(buf, "\"pomodoro_duration\"") && strstr(buf, "\"pomodoro_count\"")) {
+            if (settings_json_valid(buf)) {
                 CopyFileW(g_settings_bak_path, g_settings_path, FALSE);
                 return 1;
             }
@@ -3714,14 +3751,21 @@ void load_settings() {
     settings.default_break_is_long = 0;
     settings.enable_overtime_count_up = 1;
     memcpy(settings.fullscreen_colors, fs_default_colors, sizeof(fs_default_colors));
+    memcpy(settings.fullscreen_scales, fs_default_scales, sizeof(fs_default_scales));
+    {
+        int i;
+        for (i = 0; i < FS_COLOR_COUNT; ++i) wcscpy(settings.fullscreen_fonts[i], fs_default_fonts[i]);
+    }
     settings.fullscreen_show_text = 1;
+    settings.fullscreen_show_signature = 1;
+    settings.fullscreen_signature[0] = 0;
     pomodoro_count = 0;
     idle_mode = IDLE_POMODORO;
     idle_pomodoro_is_long = 1;
     idle_break_is_long = 0;
 
     {
-        char buf[2048] = {0};
+        char buf[8192] = {0};
         if (read_settings_json_buffer(buf, sizeof(buf))) {
             settings.long_pomodoro_duration = extract_json_int(buf, "\"long_pomodoro_duration\"",
                 extract_json_int(buf, "\"pomodoro_duration\"", settings.long_pomodoro_duration));
@@ -3740,12 +3784,24 @@ void load_settings() {
             settings.enable_overtime_count_up = extract_json_int(buf, "\"enable_overtime_count_up\"", settings.enable_overtime_count_up);
             {
                 int i;
-                for (i = 0; i < 5; ++i) {
+                for (i = 0; i < FS_COLOR_COUNT; ++i) {
                     int rgb = extract_json_int(buf, fs_color_keys[i], fs_default_colors[i]);
                     settings.fullscreen_colors[i] = rgb >= 0 && rgb <= 0xFFFFFF ? rgb : fs_default_colors[i];
+                    int scale = extract_json_int(buf, fs_scale_keys[i], fs_default_scales[i]);
+                    settings.fullscreen_scales[i] = scale >= 50 && scale <= 200 ? scale : fs_default_scales[i];
+                    const char *font_pos = settings_json_find(buf, fs_font_keys[i]);
+                    if (!font_pos || !settings_json_string(&font_pos, settings.fullscreen_fonts[i], 32) || !settings.fullscreen_fonts[i][0]) {
+                        wcscpy(settings.fullscreen_fonts[i], fs_default_fonts[i]);
+                    }
                 }
             }
             settings.fullscreen_show_text = extract_json_int(buf, "\"fullscreen_show_text\"", 1) ? 1 : 0;
+            settings.fullscreen_show_signature = extract_json_int(buf, "\"fullscreen_show_signature\"", 1) ? 1 : 0;
+            {
+                const char *signature = settings_json_find(buf, "\"fullscreen_signature\"");
+                if (!signature || !settings_json_string(&signature, settings.fullscreen_signature, FS_SIGNATURE_CAPACITY) ||
+                    !fs_signature_valid(settings.fullscreen_signature)) settings.fullscreen_signature[0] = 0;
+            }
             pomodoro_count = extract_json_int(buf, "\"pomodoro_count\"", pomodoro_count);
             idle_mode = (IdleMode)extract_json_int(buf, "\"idle_mode\"", (int)idle_mode);
             idle_pomodoro_is_long = extract_json_int(buf, "\"idle_pomodoro_is_long\"", idle_pomodoro_is_long);
@@ -3791,14 +3847,27 @@ int save_settings(void) {
 
     FILE* fp = _wfopen(g_settings_tmp_path, L"w");
     if (fp) {
-        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"enable_overtime_count_up\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d,\"fullscreen_focus_color\":%d,\"fullscreen_break_color\":%d,\"fullscreen_count_up_color\":%d,\"fullscreen_custom_color\":%d,\"fullscreen_overtime_color\":%d,\"fullscreen_show_text\":%d}",
+        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"enable_overtime_count_up\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d,\"fullscreen_focus_color\":%d,\"fullscreen_break_color\":%d,\"fullscreen_count_up_color\":%d,\"fullscreen_custom_color\":%d,\"fullscreen_overtime_color\":%d,\"fullscreen_signature_color\":%d,\"fullscreen_focus_scale\":%d,\"fullscreen_break_scale\":%d,\"fullscreen_count_up_scale\":%d,\"fullscreen_custom_scale\":%d,\"fullscreen_overtime_scale\":%d,\"fullscreen_signature_scale\":%d,\"fullscreen_show_text\":%d,\"fullscreen_show_signature\":%d",
             longDuration, longDuration, settings.long_pomodoro_count, settings.short_pomodoro_duration,
             settings.short_break_duration, settings.long_break_duration, settings.custom_duration,
             settings.adjust_block_minutes, settings.toast_auto_collapse_seconds, settings.enable_clock_sound,
             settings.enable_completion_sound, settings.show_completion_dialog, settings.default_pomodoro_is_long,
             settings.default_break_is_long, settings.enable_overtime_count_up, pomodoro_count, (int)idle_mode, idle_pomodoro_is_long, idle_break_is_long,
             settings.fullscreen_colors[0], settings.fullscreen_colors[1], settings.fullscreen_colors[2],
-            settings.fullscreen_colors[3], settings.fullscreen_colors[4], settings.fullscreen_show_text) >= 0;
+            settings.fullscreen_colors[3], settings.fullscreen_colors[4], settings.fullscreen_colors[5],
+            settings.fullscreen_scales[0], settings.fullscreen_scales[1], settings.fullscreen_scales[2],
+            settings.fullscreen_scales[3], settings.fullscreen_scales[4], settings.fullscreen_scales[5],
+            settings.fullscreen_show_text, settings.fullscreen_show_signature) >= 0;
+        {
+            int i;
+            for (i = 0; writeOk && i < FS_COLOR_COUNT; ++i) {
+                writeOk = fprintf(fp, ",%s:", fs_font_keys[i]) >= 0 &&
+                          settings_json_write_string(fp, settings.fullscreen_fonts[i]);
+            }
+        }
+        if (writeOk) writeOk = fprintf(fp, ",\"fullscreen_signature\":") >= 0 &&
+                               settings_json_write_string(fp, settings.fullscreen_signature) &&
+                               fputc('}', fp) != EOF;
         if (writeOk && fflush(fp) != 0) writeOk = 0;
         if (fclose(fp) != 0) writeOk = 0;
 

@@ -16,30 +16,46 @@ static int overlay_destroyed;
 
 static int menu_request;
 static BOOL WINAPI test_track_popup_menu(HMENU menu, UINT flags, int x, int y, int reserved, HWND owner, const RECT *rect) {
-    const wchar_t *labels[] = {L"会话", L"切换", L"待机", L"调整", L"时长", L"操作", L"颜色", L"存储", L"偏好", L"", L"统计", L"", L"退出"};
+    const wchar_t *labels[] = {L"会话", L"切换", L"待机", L"", L"全屏", L"预览", L"", L"调整", L"时长", L"偏好", L"", L"存储", L"备份", L"", L"统计", L"", L"退出"};
     int i, j;
     wchar_t label[80];
-    HMENU session = GetSubMenu(menu, 0), colors = GetSubMenu(menu, 6);
+    HMENU session = GetSubMenu(menu, 0), fullscreen = GetSubMenu(menu, 4), preview = GetSubMenu(menu, 5);
     (void)flags; (void)x; (void)y; (void)reserved; (void)owner; (void)rect;
-    CHECK(GetMenuItemCount(menu) == 13, "root menu has no standalone fullscreen/settings entries");
-    for (i = 0; i < 13; ++i) {
+    CHECK(GetMenuItemCount(menu) == 17, "root menu includes grouped items with separators");
+    for (i = 0; i < 17; ++i) {
         HMENU child = GetSubMenu(menu, i);
         GetMenuStringW(menu, i, label, 80, MF_BYPOSITION);
-        CHECK(!wcscmp(label, labels[i]), "root ordering includes operation / color / storage");
+        CHECK(!wcscmp(label, labels[i]), "root ordering matches grouped layout");
         if (child) for (j = 0; j < GetMenuItemCount(child); ++j)
             CHECK(GetSubMenu(child, j) == NULL, "menu depth does not exceed two levels");
     }
-    CHECK(GetMenuItemID(session, 4) == ID_MENU_FULLSCREEN, "fullscreen placed after session separator");
-    GetMenuStringW(session, 4, label, 80, MF_BYPOSITION);
-    CHECK(!wcscmp(label, L"全屏"), "fullscreen menu label stays short");
-    CHECK(!!(GetMenuState(session, 4, MF_BYPOSITION) & MF_CHECKED) == !!fs_active, "fullscreen menu reflects active state");
-    CHECK(GetMenuItemCount(colors) == 7, "five colors plus separator and reset");
+    CHECK(GetMenuItemCount(session) == 3, "fullscreen moved out of session menu");
+    CHECK(GetMenuItemID(fullscreen, 0) == ID_MENU_FULLSCREEN, "all screens directly accessible");
+    CHECK(GetMenuItemID(fullscreen, 1) == ID_MENU_FULLSCREEN_EXIT, "exit directly accessible");
+    CHECK(!!(GetMenuState(fullscreen, ID_MENU_FULLSCREEN_EXIT, MF_BYCOMMAND) & MF_GRAYED) == !fs_active, "exit enabled only while fullscreen");
+    GetMenuStringW(fullscreen, ID_MENU_FULLSCREEN_SHOW_TEXT, label, 80, MF_BYCOMMAND);
+    CHECK(!wcscmp(label, L"显示状态"), "state visibility has concise unambiguous label");
+    CHECK(GetMenuState(GetSubMenu(menu, 9), ID_MENU_FULLSCREEN_SHOW_TEXT, MF_BYCOMMAND) == (UINT)-1, "fullscreen state removed from preferences");
+    for (i = 0; i < (int)fs_menu_monitors.count; ++i)
+        CHECK(!!(GetMenuState(fullscreen, ID_MENU_SCREEN_FIRST + i, MF_BYCOMMAND) & MF_CHECKED) ==
+            (fs_window_index(fs_menu_monitors.items[i].identity) >= 0), "screen checkmark represents real active window");
+    CHECK(GetMenuItemCount(preview) == 9, "signature, separator, five preview modes, separator and reset");
+    GetMenuStringW(preview, 0, label, 80, MF_BYPOSITION);
+    CHECK(!wcscmp(label, L"签名"), "signature is first preview item");
+    CHECK(GetMenuItemID(preview, 0) == ID_MENU_FULLSCREEN_SIGNATURE, "signature command maps to signature dialog");
+    CHECK(GetMenuItemID(preview, 1) == 0, "separator follows signature");
     for (i = 0; i < 5; ++i) {
-        GetMenuStringW(colors, i, label, 80, MF_BYPOSITION);
-        CHECK(!wcscmp(label, fs_color_names[i]), "color item has concise label");
-        CHECK(GetMenuItemID(colors, i) == (UINT)(ID_MENU_COLOR_FIRST + i), "color command maps to intended mode");
+        GetMenuStringW(preview, 2 + i, label, 80, MF_BYPOSITION);
+        CHECK(!wcscmp(label, fs_color_names[i]), "preview mode item has concise label");
+        CHECK(GetMenuItemID(preview, 2 + i) == fs_color_command(i), "preview command maps to intended mode");
     }
-    CHECK(GetMenuItemID(colors, 6) == ID_MENU_COLOR_RESET, "color reset is directly accessible");
+    CHECK(GetMenuItemID(preview, 7) == 0, "separator precedes reset");
+    CHECK(GetMenuItemID(preview, 8) == ID_MENU_COLOR_RESET, "color reset is directly accessible");
+    CHECK(GetMenuState(fullscreen, ID_MENU_FULLSCREEN_SIGNATURE, MF_BYCOMMAND) == (UINT)-1, "signature content moved out of fullscreen menu");
+    CHECK(!!(GetMenuState(fullscreen, ID_MENU_FULLSCREEN_SHOW_SIGNATURE, MF_BYCOMMAND) & MF_CHECKED) == !!settings.fullscreen_show_signature,
+        "signature visibility checkmark matches setting");
+    for (i = 0; i < (int)fs_menu_monitors.count; ++i)
+        CHECK(!wcsstr(fs_menu_monitors.items[i].label, L"主屏"), "monitor labels omit primary annotation");
     return menu_request;
 }
 
@@ -126,6 +142,21 @@ static void capture_window(HWND window, const wchar_t *name) {
     ShowWindow(window, SW_SHOW);
     RedrawWindow(window, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
     CHECK(PrintWindow(window, memory, PW_CLIENTONLY | 2), "window renders for capture");
+    {
+        wchar_t class_name[32];
+        GetClassNameW(window, class_name, 32);
+        /* Offscreen DWM captures can retain stale child pixels. Request native
+           control printing for dialogs so screenshots contain the live draft. */
+        if (!wcscmp(class_name, L"#32770")) {
+            RECT outer;
+            POINT client = {0, 0}, previous_origin;
+            GetWindowRect(window, &outer);
+            ClientToScreen(window, &client);
+            SetViewportOrgEx(memory, outer.left - client.x, outer.top - client.y, &previous_origin);
+            SendMessageW(window, WM_PRINT, (WPARAM)memory, PRF_CLIENT | PRF_CHILDREN | PRF_ERASEBKGND);
+            SetViewportOrgEx(memory, previous_origin.x, previous_origin.y, NULL);
+        }
+    }
     header.bfType = 0x4d42; header.bfOffBits = sizeof(header) + sizeof(BITMAPINFOHEADER);
     header.bfSize = header.bfOffBits + rect.right * rect.bottom * 4;
     join_path(path, MAX_PATH, g_data_dir, name);
@@ -165,9 +196,16 @@ static BOOL CALLBACK exercise_dialog(HWND dialog, LPARAM unused) {
     DWORD first = 0, last = 0;
     (void)unused;
     GetWindowTextW(dialog, title, 80);
-    swprintf(expected_title, 40, L"%ls颜色", fs_color_names[dialog_index]);
+    swprintf(expected_title, 40, L"%ls", fs_color_names[dialog_index]);
     if (wcscmp(title, expected_title)) return TRUE;
-    CHECK(GetDlgItem(dialog, IDC_FS_EDIT_FIRST + 1) == NULL, "dialog edits only one color");
+    CHECK(GetDlgItem(dialog, IDC_FS_EDIT_FIRST + 3) == NULL, "dialog edits only one color");
+    CHECK(GetDlgItem(dialog, IDC_FS_FONT_FIRST) != NULL, "mode dialog includes font combo");
+    CHECK(GetDlgItem(dialog, IDC_FS_SCALE_FIRST) != NULL, "mode dialog includes scale combo");
+    CHECK(GetNextDlgTabItem(dialog, GetDlgItem(dialog, IDC_FS_FONT_FIRST), FALSE) == GetDlgItem(dialog, IDC_FS_SCALE_FIRST), "dialog tab reaches scale combo");
+    CHECK(GetNextDlgTabItem(dialog, GetDlgItem(dialog, IDC_FS_SCALE_FIRST), FALSE) == GetDlgItem(dialog, IDC_FS_EDIT_FIRST), "dialog tab reaches color edit");
+    CHECK(GetNextDlgTabItem(dialog, GetDlgItem(dialog, IDC_FS_EDIT_FIRST), FALSE) == GetDlgItem(dialog, IDC_FS_PICK_FIRST), "dialog tab reaches pick button");
+    CHECK(GetNextDlgTabItem(dialog, GetDlgItem(dialog, IDC_FS_PICK_FIRST), FALSE) == GetDlgItem(dialog, IDC_FS_PREVIEW_FIRST), "dialog tab reaches preview");
+    CHECK(GetNextDlgTabItem(dialog, GetDlgItem(dialog, IDC_FS_PREVIEW_FIRST), FALSE) == GetDlgItem(dialog, IDC_FS_COLOR_FULL), "dialog tab reaches full preview button");
     SendDlgItemMessageW(dialog, IDC_FS_EDIT_FIRST, EM_GETSEL, (WPARAM)&first, (LPARAM)&last);
     CHECK(first == 0 && last == 7, "current code is selected on entry");
     if (dialog_case == 1) {
@@ -179,7 +217,43 @@ static BOOL CALLBACK exercise_dialog(HWND dialog, LPARAM unused) {
         capture_window(dialog, L"colors-dialog.bmp");
         SendMessageW(dialog, WM_COMMAND, IDCANCEL, 0);
     } else if (dialog_case == 2) {
+        FullscreenView original;
+        int running = is_running, paused = is_paused, seconds = remaining_seconds;
+        TimerMode mode = current_timer_mode;
+        size_t count = fs_count;
+        fs_read_view(&original);
         SetDlgItemTextW(dialog, IDC_FS_EDIT_FIRST, L"#123456");
+        SendMessageW(GetDlgItem(dialog, IDC_FS_FONT_FIRST), CB_SETCURSEL, 1, 0);
+        SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(IDC_FS_FONT_FIRST, CBN_SELCHANGE), (LPARAM)GetDlgItem(dialog, IDC_FS_FONT_FIRST));
+        SendMessageW(GetDlgItem(dialog, IDC_FS_SCALE_FIRST), CB_SETCURSEL, 3, 0);
+        SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(IDC_FS_SCALE_FIRST, CBN_SELCHANGE), (LPARAM)GetDlgItem(dialog, IDC_FS_SCALE_FIRST));
+        {
+            RECT preview_rect = {0};
+            SendMessageW(GetDlgItem(dialog, IDC_FS_PREVIEW_FIRST), EM_GETRECT, 0, (LPARAM)&preview_rect);
+            CHECK(preview_rect.top >= 10, "color mode preview remains vertically centered after changing font and scale");
+        }
+        SendMessageW(dialog, WM_COMMAND, IDC_FS_COLOR_FULL, 0);
+        CHECK(fs_preview_active && !IsWindowVisible(dialog), "color editor uses shared fullscreen preview");
+        CHECK(fs_count >= count, "color preview preserves coverage");
+        if (dialog_index == 5) {
+            CHECK(fs_view.signature_color == 0x123456 && fs_view.signature[0], "signature color preview shows visible sample even with empty content");
+            CHECK(fs_view.color == original.color, "signature color preview does not recolor timer");
+        } else {
+            CHECK(fs_view.color == 0x123456 && !wcscmp(fs_view.status, fs_color_names[dialog_index]), "color preview shows selected state rather than active timer state");
+            CHECK(!wcscmp(fs_view.font, L"Bahnschrift"), "color preview uses draft font");
+            CHECK(fs_view.scale == 120, "color preview uses draft scale");
+            CHECK(fs_view.signature_color == original.signature_color, "state color preview preserves independent signature color");
+        }
+        if (fs_count) SendMessageW(fs_windows[0], WM_KEYDOWN, VK_ESCAPE, 0);
+        CHECK(!fs_preview_active && IsWindowVisible(dialog) && fs_count == count, "color preview returns to original editor and coverage");
+        {
+            RECT preview_rect = {0};
+            SendMessageW(GetDlgItem(dialog, IDC_FS_PREVIEW_FIRST), EM_GETRECT, 0, (LPARAM)&preview_rect);
+            CHECK(preview_rect.top >= 10, "color mode preview remains vertically centered after returning from fullscreen preview");
+        }
+        CHECK(is_running == running && is_paused == paused && remaining_seconds == seconds && current_timer_mode == mode, "color preview does not mutate timer state");
+        CHECK(settings.fullscreen_colors[dialog_index] == fs_default_colors[dialog_index], "color preview does not save draft");
+        if (dialog_index == 5) capture_window(dialog, L"signature-color-dialog.bmp");
         SendMessageW(dialog, WM_COMMAND, IDOK, 0);
     } else {
         picker_owner = dialog;
@@ -201,6 +275,245 @@ static void write_test_json(const wchar_t *path, const char *json) {
     FILE *file = _wfopen(path, L"w");
     CHECK(file != NULL, "open isolated settings fixture");
     if (file) { fputs(json, file); fclose(file); }
+}
+
+static void signature_input(HWND dialog, const wchar_t *text) {
+    SendDlgItemMessageW(dialog, IDC_FS_SIGNATURE, EM_SETSEL, 0, -1);
+    SendDlgItemMessageW(dialog, IDC_FS_SIGNATURE, EM_REPLACESEL, TRUE, (LPARAM)text);
+}
+static int signature_case;
+static const wchar_t *signature_sample = L"把今天做好。\r\n\r\n一步一步，慢慢来。";
+static BOOL CALLBACK exercise_signature(HWND dialog, LPARAM unused) {
+    wchar_t title[80], text[FS_SIGNATURE_CAPACITY + 10];
+    int before_running = is_running, before_seconds = remaining_seconds;
+    size_t before_count = fs_count;
+    HWND before_window = fs_count ? fs_windows[0] : NULL;
+    (void)unused;
+    GetWindowTextW(dialog, title, 80);
+    if (wcscmp(title, L"签名")) return TRUE;
+    CHECK(GetDlgItem(dialog, IDC_FS_SIGNATURE_SHOW) == NULL, "visibility switch belongs in menu, not content editor");
+    CHECK(GetDlgItem(dialog, IDC_FS_SIGNATURE_COLOR) != NULL, "merged signature dialog includes color input");
+    CHECK(GetDlgItem(dialog, IDC_FS_SIGNATURE_PICK) != NULL, "merged signature dialog includes pick button");
+    GetDlgItemTextW(dialog, IDC_FS_SIGNATURE, text, FS_SIGNATURE_CAPACITY);
+    CHECK(!wcscmp(text, settings.fullscreen_signature), "editor starts with saved signature");
+    CHECK(GetWindowLongW(GetDlgItem(dialog, IDC_FS_SIGNATURE), GWL_STYLE) & ES_WANTRETURN, "Enter inserts newline in editor");
+    CHECK(GetWindowLongW(GetDlgItem(dialog, IDC_FS_SIGNATURE), GWL_STYLE) & ES_MULTILINE, "editor supports multiple lines");
+    {
+        RECT client, button;
+        GetClientRect(dialog, &client);
+        GetWindowRect(GetDlgItem(dialog, IDCANCEL), &button);
+        MapWindowPoints(NULL, dialog, (POINT *)&button, 2);
+        CHECK(button.left >= 0 && button.top >= 0 && button.right <= client.right && button.bottom <= client.bottom,
+            "dialog action buttons fit inside the client area");
+    }
+    signature_input(dialog, L"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7");
+    CHECK(!IsWindowEnabled(GetDlgItem(dialog, IDOK)), "seven lines rejected visibly");
+    {
+        int i;
+        for (i = 0; i < FS_SIGNATURE_CAPACITY; ++i) text[i] = L'字';
+        text[FS_SIGNATURE_CAPACITY] = 0;
+        signature_input(dialog, text);
+        CHECK(!IsWindowEnabled(GetDlgItem(dialog, IDOK)), "overlength paste cannot save truncated draft");
+        {
+            HWND preview = GetDlgItem(dialog, IDC_FS_SIGNATURE_PREVIEW);
+            LOGFONTW font;
+            GetObjectW((HFONT)SendMessageW(preview, WM_GETFONT, 0, 0), sizeof(font), &font);
+            CHECK(abs(font.lfHeight) >= 18, "long local preview never shrinks text");
+            CHECK(GetWindowLongW(preview, GWL_STYLE) & WS_VSCROLL, "long local preview offers scrolling");
+            SendMessageW(preview, EM_LINESCROLL, 0, 10);
+            CHECK(SendMessageW(preview, EM_GETFIRSTVISIBLELINE, 0, 0) > 0, "local preview can scroll to later lines");
+        }
+    }
+    signature_input(dialog, signature_sample);
+    CHECK(IsWindowEnabled(GetDlgItem(dialog, IDOK)), "multiline Chinese accepted");
+    if (signature_case == 2) {
+        SetDlgItemTextW(dialog, IDC_FS_SIGNATURE_COLOR, L"#123456");
+        SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(IDC_FS_SIGNATURE_COLOR, EN_CHANGE), (LPARAM)GetDlgItem(dialog, IDC_FS_SIGNATURE_COLOR));
+        SendMessageW(GetDlgItem(dialog, IDC_FS_SIGNATURE_FONT), CB_SETCURSEL, 1, 0);
+        SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(IDC_FS_SIGNATURE_FONT, CBN_SELCHANGE), (LPARAM)GetDlgItem(dialog, IDC_FS_SIGNATURE_FONT));
+        SendMessageW(GetDlgItem(dialog, IDC_FS_SIGNATURE_SCALE), CB_SETCURSEL, 3, 0);
+        SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(IDC_FS_SIGNATURE_SCALE, CBN_SELCHANGE), (LPARAM)GetDlgItem(dialog, IDC_FS_SIGNATURE_SCALE));
+        {
+            RECT preview_rect = {0};
+            SendMessageW(GetDlgItem(dialog, IDC_FS_SIGNATURE_PREVIEW), EM_GETRECT, 0, (LPARAM)&preview_rect);
+            CHECK(preview_rect.top >= 10, "signature preview remains vertically centered after changing font and scale");
+        }
+    }
+    CHECK(fs_signature_draft && !wcscmp(fs_signature_draft->text, signature_sample), "edit notification updates live preview draft");
+    {
+        LOGFONTW font;
+        HWND preview = GetDlgItem(dialog, IDC_FS_SIGNATURE_PREVIEW);
+        GetWindowTextW(preview, text, FS_SIGNATURE_CAPACITY);
+        CHECK(!wcscmp(text, signature_sample), "local preview contains only the signature, not timer thumbnail");
+        GetObjectW((HFONT)SendMessageW(preview, WM_GETFONT, 0, 0), sizeof(font), &font);
+        CHECK(abs(font.lfHeight) >= 18, "local preview uses legible fixed-size text");
+    }
+    pump(100);
+    CHECK(!settings.fullscreen_signature[0], "typing does not change saved settings");
+    RedrawWindow(dialog, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+    capture_window(dialog, L"signature-dialog.bmp");
+    SendMessageW(dialog, WM_COMMAND, IDC_FS_SIGNATURE_FULL, 0);
+    CHECK(fs_preview_active && fs_count, "fullscreen preview opens");
+    CHECK(!IsWindowVisible(dialog), "editor hides during preview");
+    CHECK(!wcscmp(fs_view.signature, signature_sample), "fullscreen uses draft signature");
+    if (signature_case == 2) {
+        CHECK(fs_view.signature_color == 0x123456, "fullscreen preview uses draft signature color");
+        CHECK(!wcscmp(fs_view.signature_font, L"KaiTi"), "fullscreen preview uses draft signature font");
+        CHECK(fs_view.signature_scale == 120, "fullscreen preview uses draft signature scale");
+    }
+    if (before_count) CHECK(fs_count == before_count && fs_windows[0] == before_window, "preview preserves selected screens and windows");
+    if (fs_count) {
+        capture_window(fs_windows[0], L"signature-fullscreen.bmp");
+        {
+            size_t screen;
+            for (screen = 0; screen < fs_count; ++screen) {
+                RECT bounds;
+                GetWindowRect(fs_windows[screen], &bounds);
+                if (bounds.bottom - bounds.top > bounds.right - bounds.left)
+                    capture_window(fs_windows[screen], L"signature-portrait.bmp");
+            }
+        }
+        SendMessageW(fs_windows[0], WM_RBUTTONUP, 0, 0);
+        CHECK(is_running == before_running && remaining_seconds == before_seconds, "preview right click does not change timer");
+        SendMessageW(fs_windows[0], WM_KEYDOWN, VK_ESCAPE, 0);
+    }
+    CHECK(!fs_preview_active && IsWindowVisible(dialog), "Escape returns to editor");
+    {
+        RECT preview_rect = {0};
+        SendMessageW(GetDlgItem(dialog, IDC_FS_SIGNATURE_PREVIEW), EM_GETRECT, 0, (LPARAM)&preview_rect);
+        CHECK(preview_rect.top >= 10, "signature preview remains vertically centered after returning from fullscreen preview");
+    }
+    CHECK(fs_count == before_count, "preview restores original coverage");
+    CHECK(!settings.fullscreen_signature[0], "preview never saves the draft");
+    SendMessageW(dialog, WM_COMMAND, IDC_FS_SIGNATURE_FULL, 0);
+    CHECK(GetNextDlgTabItem(dialog, GetDlgItem(dialog, IDC_FS_SIGNATURE), FALSE) == GetDlgItem(dialog, IDC_FS_SIGNATURE_FONT), "keyboard tab reaches font combo");
+    CHECK(GetNextDlgTabItem(dialog, GetDlgItem(dialog, IDC_FS_SIGNATURE_FONT), FALSE) == GetDlgItem(dialog, IDC_FS_SIGNATURE_SCALE), "keyboard tab reaches scale combo");
+    CHECK(GetNextDlgTabItem(dialog, GetDlgItem(dialog, IDC_FS_SIGNATURE_SCALE), FALSE) == GetDlgItem(dialog, IDC_FS_SIGNATURE_COLOR), "keyboard tab reaches color edit");
+    CHECK(GetNextDlgTabItem(dialog, GetDlgItem(dialog, IDC_FS_SIGNATURE_COLOR), FALSE) == GetDlgItem(dialog, IDC_FS_SIGNATURE_PICK), "keyboard tab reaches pick button");
+    CHECK(GetNextDlgTabItem(dialog, GetDlgItem(dialog, IDC_FS_SIGNATURE_PICK), FALSE) == GetDlgItem(dialog, IDC_FS_SIGNATURE_PREVIEW), "keyboard tab reaches scrollable preview");
+    CHECK(GetNextDlgTabItem(dialog, GetDlgItem(dialog, IDC_FS_SIGNATURE_PREVIEW), FALSE) == GetDlgItem(dialog, IDC_FS_SIGNATURE_FULL), "keyboard tab reaches fullscreen preview button");
+    SendMessageW(dialog, WM_COMMAND, signature_case == 2 ? IDOK : IDCANCEL, 0);
+    return FALSE;
+}
+static VOID CALLBACK signature_timer(HWND hwnd, UINT msg, UINT_PTR id, DWORD tick) {
+    (void)hwnd; (void)msg; (void)tick;
+    KillTimer(NULL, id);
+    EnumThreadWindows(GetCurrentThreadId(), exercise_signature, 0);
+}
+static void test_screen_selection(void) {
+    HWND first;
+    int created, destroyed;
+    FullscreenMonitors snapshot;
+    fs_exit();
+    choose_menu(ID_MENU_SCREEN_FIRST);
+    CHECK(fs_count == 1 && fs_active, "first menu screen enters alone");
+    if (!fs_count) return;
+    first = fs_windows[0]; created = overlay_created; destroyed = overlay_destroyed;
+    if (fs_menu_monitors.count > 1) {
+        choose_menu(ID_MENU_SCREEN_FIRST + 1);
+        CHECK(fs_count == 2 && fs_windows[0] == first, "second screen adds to first without replacing it");
+        CHECK(overlay_created == created + 1 && overlay_destroyed == destroyed, "adding second screen has no old-window destruction");
+        choose_menu(ID_MENU_SCREEN_FIRST + 1);
+        CHECK(fs_count == 1 && fs_windows[0] == first, "unchecking screen removes only that screen");
+    }
+    SendMessageW(g_main_hwnd, WM_DISPLAYCHANGE, 32, 0); pump(300);
+    CHECK(fs_count == 1 && fs_windows[0] == first, "layout message preserves selection and existing window");
+    SendMessageW(g_main_hwnd, WM_USER + 1, 0, WM_MBUTTONUP);
+    CHECK(fs_count == (size_t)monitor_count && fs_windows[0] == first, "tray middle click fills all screens preserving first window");
+    created = overlay_created; destroyed = overlay_destroyed;
+    SendMessageW(g_main_hwnd, WM_USER + 1, 0, WM_MBUTTONUP);
+    CHECK(fs_count == (size_t)monitor_count && overlay_created == created && overlay_destroyed == destroyed, "repeated tray middle click is idempotent");
+    fs_get_monitors(&snapshot);
+    if (snapshot.count > 1) {
+        --snapshot.count;
+        fs_reconcile_monitors(&snapshot);
+        CHECK(fs_count == snapshot.count, "simulated unplug removes only disconnected screen");
+        fs_build_windows();
+        CHECK(fs_count == snapshot.count, "reconnected screen does not automatically join");
+    }
+    memset(&snapshot, 0, sizeof(snapshot));
+    fs_reconcile_monitors(&snapshot);
+    CHECK(!fs_active && !fs_count, "loss of last selected screen exits fullscreen");
+    choose_menu(ID_MENU_SCREEN_FIRST); choose_menu(ID_MENU_SCREEN_FIRST);
+    CHECK(!fs_active && !fs_count, "unchecking last screen exits fullscreen");
+    choose_menu(ID_MENU_SCREEN_FIRST);
+    if (fs_count) SendMessageW(fs_windows[0], WM_MBUTTONDOWN, 0, 0);
+    CHECK(!fs_active && !fs_count, "middle click on overlay exits all screens");
+}
+static void test_signature(void) {
+    FullscreenView view;
+    FullscreenSignatureDraft draft = {0};
+    wchar_t previous_path[MAX_PATH], unicode[FS_SIGNATURE_CAPACITY];
+    MSG message;
+    const char *sample;
+    int i;
+    fs_exit(); settings.fullscreen_signature[0] = 0; settings.fullscreen_show_signature = 1;
+    signature_case = 1;
+    SetTimer(NULL, 0, 100, signature_timer); choose_menu(ID_MENU_FULLSCREEN_SIGNATURE);
+    CHECK(!settings.fullscreen_signature[0], "cancel discards signature draft");
+    choose_menu(ID_MENU_SCREEN_FIRST);
+    SetTimer(NULL, 0, 100, signature_timer); choose_menu(ID_MENU_FULLSCREEN_SIGNATURE);
+    CHECK(fs_count == 1 && !settings.fullscreen_signature[0], "cancel preserves existing selected screen");
+    fs_exit();
+    choose_menu(ID_MENU_FULLSCREEN_SHOW_SIGNATURE);
+    CHECK(!settings.fullscreen_show_signature, "signature display toggles directly in menu");
+    signature_case = 2;
+    SetTimer(NULL, 0, 100, signature_timer); choose_menu(ID_MENU_FULLSCREEN_SIGNATURE);
+    load_settings();
+    CHECK(!wcscmp(settings.fullscreen_signature, signature_sample), "signature save survives reload with empty lines");
+    CHECK(settings.fullscreen_colors[5] == 0x123456, "signature color save survives reload");
+    CHECK(!wcscmp(settings.fullscreen_fonts[5], L"KaiTi"), "signature font save survives reload");
+    CHECK(settings.fullscreen_scales[5] == 120, "signature scale save survives reload");
+    CHECK(!settings.fullscreen_show_signature, "editing hidden signature preserves display switch");
+    choose_menu(ID_MENU_FULLSCREEN_SHOW_SIGNATURE);
+    settings.fullscreen_show_text = 0;
+    fs_read_view(&view);
+    CHECK(!view.show_text && !wcscmp(view.signature, signature_sample), "signature is independent of state visibility");
+    fs_show_all();
+    if (fs_count) capture_window(fs_windows[0], L"signature-no-status.bmp");
+    settings.fullscreen_show_signature = 0; fs_refresh();
+    CHECK(!fs_view.signature[0] && !fs_view.show_text, "both texts can be hidden independently");
+    if (fs_count) capture_window(fs_windows[0], L"time-only.bmp");
+    fs_exit();
+    settings.fullscreen_show_signature = 1;
+    wcscpy(draft.text, L"中文\r\n\"fullscreen_show_text\":0 \\ & \xD83D\xDE80");
+    draft.color = 0x8899AA;
+    CHECK(fs_save_signature(&draft), "save escaped Unicode signature");
+    load_settings();
+    CHECK(!wcscmp(settings.fullscreen_signature, draft.text), "quotes backslash ampersand emoji roundtrip exactly");
+    CHECK(settings.fullscreen_colors[5] == 0x8899AA, "signature color roundtrip exactly");
+    settings.fullscreen_colors[5] = fs_default_colors[5];
+    for (i = 0; i < 500; ++i) draft.text[i] = L'字'; draft.text[500] = 0;
+    CHECK(fs_save_signature(&draft), "500 characters save successfully");
+    load_settings(); CHECK(wcslen(settings.fullscreen_signature) == 500, "configuration larger than old 2KB buffer survives reload");
+    settings.fullscreen_show_text = 1;
+    fs_show_all();
+    if (fs_count) {
+        size_t screen;
+        for (screen = 0; screen < fs_count; ++screen) {
+            RECT bounds;
+            GetWindowRect(fs_windows[screen], &bounds);
+            if (bounds.bottom - bounds.top > bounds.right - bounds.left)
+                capture_window(fs_windows[screen], L"signature-long-portrait.bmp");
+        }
+    }
+    fs_exit();
+
+    wcscpy(previous_path, g_settings_tmp_path);
+    wcscpy(g_settings_tmp_path, g_data_dir); /* A directory cannot be opened as a file. */
+    wcscpy(draft.text, L"不可保存的草稿");
+    CHECK(!fs_save_signature(&draft), "write failure reported");
+    CHECK(wcslen(settings.fullscreen_signature) == 500 && settings.fullscreen_show_signature, "failed signature save restores live settings");
+    wcscpy(g_settings_tmp_path, previous_path);
+    while (PeekMessageW(&message, g_main_hwnd, WM_SETTINGS_SAVE_FAILED, WM_SETTINGS_SAVE_FAILED, PM_REMOVE)) { }
+    sample = "\"中文\\n\\\"quoted\\\"\\\\\"";
+    CHECK(settings_json_string(&sample, unicode, FS_SIGNATURE_CAPACITY) && !wcscmp(unicode, L"中文\n\"quoted\"\\"), "raw UTF8 signature decodes");
+    CHECK(extract_json_int("{\"fullscreen_signature\":\"\\\"fullscreen_show_text\\\":0\",\"fullscreen_show_text\":1}", "\"fullscreen_show_text\"", -1) == 1, "embedded setting name cannot override real key");
+    CHECK(!settings_json_valid("{\"pomodoro_duration\":42,\"pomodoro_count\":3,\"fullscreen_signature\":\"truncated"), "truncated settings rejected for recovery");
+    CHECK(!settings_json_valid("{\"pomodoro_duration\":42,\"pomodoro_count\":3}garbage"), "trailing corruption rejected");
+    CHECK(settings_json_valid("\xEF\xBB\xBF{\"pomodoro_duration\":42,\"pomodoro_count\":3}"), "UTF8 BOM settings remain compatible");
+    settings.fullscreen_signature[0] = 0; settings.fullscreen_show_text = 1; settings.fullscreen_show_signature = 1;
+    save_settings();
 }
 
 int wmain(int argc, wchar_t **argv) {
@@ -287,20 +600,26 @@ int wmain(int argc, wchar_t **argv) {
     if (fs_count) SendMessageW(fs_windows[fs_count - 1], WM_KEYDOWN, VK_ESCAPE, 0);
     CHECK(!fs_active && !fs_count && is_running && is_overtime, "escape exits all overlays without stopping timer");
     is_running = 0; is_overtime = 0; current_timer_mode = TIMER_NONE;
+    refresh_timer_icon_by_state(g_main_hwnd); /* Include the persistent tray icon in both GDI snapshots. */
     gdi_before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
     for (i = 0; i < (stress ? 8 : 1); ++i) {
-        fs_toggle(); pump(20);
+        fs_show_all(); pump(20);
         if (fs_count) SendMessageW(fs_windows[0], WM_LBUTTONDOWN, MK_LBUTTON, 0);
     }
     CHECK(!fs_active && !fs_count, "click exits all overlays");
 
+    test_screen_selection();
+    test_signature();
+
     /* Test right click toggle and mouse hover HUD prompt in fullscreen */
-    fs_toggle(); pump(50);
+    fs_show_all(); pump(50);
     CHECK(fs_active && !is_running, "re-entered fullscreen in idle state");
     if (fs_count) {
+        --fs_last_cursor.x;
         SendMessageW(fs_windows[0], WM_MOUSEMOVE, 0, MAKELPARAM(100, 100));
         pump(20);
         CHECK(fs_hud_visible, "mouse move in fullscreen activates HUD prompt");
+        capture_window(fs_windows[0], L"fullscreen-hud.bmp");
         SendMessageW(fs_windows[0], WM_RBUTTONUP, 0, MAKELPARAM(100, 100));
         pump(100);
         CHECK(fs_active && is_running, "right click in fullscreen starts timer without exiting");
@@ -332,10 +651,13 @@ int wmain(int argc, wchar_t **argv) {
     CHECK(settings.fullscreen_colors[0] == fs_default_colors[0], "cancel discards edits");
     dialog_case = 2;
     for (dialog_index = 0; dialog_index < 5; ++dialog_index) {
-        SetTimer(NULL, 0, 150, dialog_timer); choose_menu(ID_MENU_COLOR_FIRST + dialog_index);
+        SetTimer(NULL, 0, 150, dialog_timer); choose_menu(fs_color_command(dialog_index));
         memset(settings.fullscreen_colors, 0, sizeof(settings.fullscreen_colors)); load_settings();
-        for (i = 0; i < 5; ++i)
+        for (i = 0; i < 5; ++i) {
             CHECK(settings.fullscreen_colors[i] == (i <= dialog_index ? 0x123456 : fs_default_colors[i]), "save changes only chosen color and survives reload");
+            CHECK(!wcscmp(settings.fullscreen_fonts[i], i <= dialog_index ? L"Bahnschrift" : fs_default_fonts[i]), "save changes font and survives reload");
+            CHECK(settings.fullscreen_scales[i] == (i <= dialog_index ? 120 : fs_default_scales[i]), "save changes scale and survives reload");
+        }
     }
     dialog_case = 4; dialog_index = 0;
     SetTimer(NULL, 0, 150, dialog_timer); choose_menu(ID_MENU_COLOR_FIRST);
@@ -345,14 +667,19 @@ int wmain(int argc, wchar_t **argv) {
         choose_menu(ID_MENU_COLOR_RESET);
         load_settings();
         CHECK(settings.long_pomodoro_duration == duration, "palette reset preserves timer settings");
-        for (i = 0; i < 5; ++i) CHECK(settings.fullscreen_colors[i] == fs_default_colors[i], "menu restores and persists all default colors");
+        for (i = 0; i < FS_COLOR_COUNT; ++i) {
+            CHECK(settings.fullscreen_colors[i] == fs_default_colors[i], "menu restores and persists all default colors");
+            CHECK(!wcscmp(settings.fullscreen_fonts[i], fs_default_fonts[i]), "menu restores and persists all default fonts");
+            CHECK(settings.fullscreen_scales[i] == fs_default_scales[i], "menu restores and persists all default scales");
+        }
     }
-    choose_menu(ID_MENU_FULLSCREEN); CHECK(fs_active, "session menu enters fullscreen");
-    choose_menu(ID_MENU_FULLSCREEN); CHECK(!fs_active, "session menu exits fullscreen");
+    choose_menu(ID_MENU_FULLSCREEN); CHECK(fs_active, "all screens menu enters fullscreen");
+    choose_menu(ID_MENU_FULLSCREEN); CHECK(fs_active, "all screens menu is idempotent");
+    choose_menu(ID_MENU_FULLSCREEN_EXIT); CHECK(!fs_active, "exit fullscreen menu exits all windows");
 
     settings.enable_clock_sound = 0; settings.enable_completion_sound = 0; settings.show_completion_dialog = 1;
     settings.enable_overtime_count_up = 1;
-    fs_toggle(); start_timer(g_main_hwnd, 0, TIMER_CUSTOM); pump(1250);
+    fs_show_all(); start_timer(g_main_hwnd, 0, TIMER_CUSTOM); pump(1250);
     CHECK(is_overtime && is_running && fs_active && fs_view.time[0] == L'+', "real timer completes into fullscreen overtime");
     CHECK(!g_hToastWnd, "completion toast suppressed in fullscreen");
     CHECK(pomodoro_count == 0, "custom completion and overtime do not credit tomatoes");
@@ -366,19 +693,20 @@ int wmain(int argc, wchar_t **argv) {
     }
     stop_timer_thread_if_needed(); clear_overtime_state(); fs_exit();
     settings.enable_overtime_count_up = 0; settings.show_completion_dialog = 0;
-    fs_toggle(); start_timer(g_main_hwnd, 0, TIMER_CUSTOM); pump(200);
+    fs_show_all(); start_timer(g_main_hwnd, 0, TIMER_CUSTOM); pump(200);
     CHECK(!is_running && fs_active && !wcscmp(fs_view.time, L"00:00") && wcsstr(fs_view.status, L"已完成"), "completion remains visible even with toast disabled");
     stop_timer_thread_if_needed(); fs_exit();
-    fs_toggle(); CHECK(wcsstr(fs_view.status, L"未开始") != NULL, "reentry clears completed presentation"); fs_exit();
+    fs_show_all(); CHECK(wcsstr(fs_view.status, L"未开始") != NULL, "reentry clears completed presentation"); fs_exit();
 
     /* Verify compatibility and the existing recovery chain without registry writes. */
     write_test_json(g_settings_path, "{\"pomodoro_duration\":42,\"pomodoro_count\":3}");
     load_settings();
     CHECK(settings.long_pomodoro_duration == 42 && pomodoro_count == 3, "legacy settings preserve existing values");
-    for (i = 0; i < 5; ++i) CHECK(settings.fullscreen_colors[i] == fs_default_colors[i], "legacy settings get new palette defaults");
+    CHECK(!settings.fullscreen_signature[0] && settings.fullscreen_show_signature, "legacy signature defaults to empty");
+    for (i = 0; i < FS_COLOR_COUNT; ++i) CHECK(settings.fullscreen_colors[i] == fs_default_colors[i], "legacy settings get new palette defaults");
     write_test_json(g_settings_path, "{\"pomodoro_duration\":42,\"pomodoro_count\":3,\"fullscreen_focus_color\":-1,\"fullscreen_break_color\":16777216,\"fullscreen_count_up_color\":\"bad\"}");
     load_settings();
-    for (i = 0; i < 5; ++i) CHECK(settings.fullscreen_colors[i] == fs_default_colors[i], "invalid stored color falls back to default");
+    for (i = 0; i < FS_COLOR_COUNT; ++i) CHECK(settings.fullscreen_colors[i] == fs_default_colors[i], "invalid stored color falls back to default");
     settings.fullscreen_colors[0] = 0x654321; CHECK(save_settings(), "save settings recovery fixture");
     CopyFileW(g_settings_path, g_settings_tmp_path, FALSE);
     write_test_json(g_settings_path, "corrupt");
