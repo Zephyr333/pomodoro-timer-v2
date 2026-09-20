@@ -779,7 +779,32 @@ static BOOL CALLBACK fs_collect_monitor(HMONITOR monitor, HDC dc, LPRECT rect, L
     return TRUE;
 }
 static int fs_monitor_order(const void *a, const void *b) {
-    return wcscmp(((const FullscreenMonitor *)a)->info.szDevice, ((const FullscreenMonitor *)b)->info.szDevice);
+    const FullscreenMonitor *ma = (const FullscreenMonitor *)a;
+    const FullscreenMonitor *mb = (const FullscreenMonitor *)b;
+    LONG width_a = ma->info.rcMonitor.right - ma->info.rcMonitor.left;
+    LONG width_b = mb->info.rcMonitor.right - mb->info.rcMonitor.left;
+    LONG min_w = width_a < width_b ? width_a : width_b;
+    LONG overlap_left = ma->info.rcMonitor.left > mb->info.rcMonitor.left ? ma->info.rcMonitor.left : mb->info.rcMonitor.left;
+    LONG overlap_right = ma->info.rcMonitor.right < mb->info.rcMonitor.right ? ma->info.rcMonitor.right : mb->info.rcMonitor.right;
+    LONG overlap_x = overlap_right - overlap_left;
+    LONG cx_a = ma->info.rcMonitor.left + width_a / 2;
+    LONG cx_b = mb->info.rcMonitor.left + width_b / 2;
+
+    /* If two monitors overlap horizontally by more than 50% of the narrower screen,
+       they are in the same vertical column (stacked vertically): sort top-to-bottom. */
+    if (min_w > 0 && overlap_x > min_w / 2) {
+        if (ma->info.rcMonitor.top != mb->info.rcMonitor.top)
+            return (ma->info.rcMonitor.top < mb->info.rcMonitor.top) ? -1 : 1;
+    }
+
+    /* Otherwise, sort left-to-right primarily by horizontal center, then left coordinate. */
+    if (cx_a != cx_b)
+        return (cx_a < cx_b) ? -1 : 1;
+    if (ma->info.rcMonitor.left != mb->info.rcMonitor.left)
+        return (ma->info.rcMonitor.left < mb->info.rcMonitor.left) ? -1 : 1;
+    if (ma->info.rcMonitor.top != mb->info.rcMonitor.top)
+        return (ma->info.rcMonitor.top < mb->info.rcMonitor.top) ? -1 : 1;
+    return wcscmp(ma->info.szDevice, mb->info.szDevice);
 }
 static int fs_get_monitors(FullscreenMonitors *list) {
     HANDLE previous = fs_enter_dpi();

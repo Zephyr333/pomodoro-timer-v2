@@ -442,6 +442,53 @@ static void test_screen_selection(void) {
     if (fs_count) SendMessageW(fs_windows[0], WM_MBUTTONDOWN, 0, 0);
     CHECK(!fs_active && !fs_count, "middle click on overlay exits all screens");
 }
+static void test_monitor_ordering(void) {
+    FullscreenMonitor monitors[4];
+
+    /* Test 1: Horizontal side-by-side monitors out of order (DISPLAY1 at X=0, DISPLAY2 at X=2720, DISPLAY3 at X=1920) */
+    memset(monitors, 0, sizeof(monitors));
+    wcscpy(monitors[0].info.szDevice, L"\\\\.\\DISPLAY1");
+    SetRect(&monitors[0].info.rcMonitor, 0, 0, 1440, 900);
+
+    wcscpy(monitors[1].info.szDevice, L"\\\\.\\DISPLAY2");
+    SetRect(&monitors[1].info.rcMonitor, 2720, -120, 4914, 1114);
+
+    wcscpy(monitors[2].info.szDevice, L"\\\\.\\DISPLAY3");
+    SetRect(&monitors[2].info.rcMonitor, 1920, -40, 2720, 1240);
+
+    qsort(monitors, 3, sizeof(monitors[0]), fs_monitor_order);
+    CHECK(!wcscmp(monitors[0].info.szDevice, L"\\\\.\\DISPLAY1"), "spatial order: leftmost screen is first");
+    CHECK(!wcscmp(monitors[1].info.szDevice, L"\\\\.\\DISPLAY3"), "spatial order: middle screen is second");
+    CHECK(!wcscmp(monitors[2].info.szDevice, L"\\\\.\\DISPLAY2"), "spatial order: rightmost screen is third");
+
+    /* Test 2: Vertically stacked monitors (stacked in same column) */
+    memset(monitors, 0, sizeof(monitors));
+    wcscpy(monitors[0].info.szDevice, L"\\\\.\\DISPLAY_BOT");
+    SetRect(&monitors[0].info.rcMonitor, 0, 0, 1920, 1080);
+
+    wcscpy(monitors[1].info.szDevice, L"\\\\.\\DISPLAY_TOP");
+    SetRect(&monitors[1].info.rcMonitor, 0, -1080, 1920, 0);
+
+    qsort(monitors, 2, sizeof(monitors[0]), fs_monitor_order);
+    CHECK(!wcscmp(monitors[0].info.szDevice, L"\\\\.\\DISPLAY_TOP"), "spatial order: top stacked screen is first");
+    CHECK(!wcscmp(monitors[1].info.szDevice, L"\\\\.\\DISPLAY_BOT"), "spatial order: bottom stacked screen is second");
+
+    /* Test 3: Mixed arrangement (left single screen, right stacked screens) */
+    memset(monitors, 0, sizeof(monitors));
+    wcscpy(monitors[0].info.szDevice, L"\\\\.\\DISPLAY_RIGHT_BOT");
+    SetRect(&monitors[0].info.rcMonitor, 1920, 0, 3840, 1080);
+
+    wcscpy(monitors[1].info.szDevice, L"\\\\.\\DISPLAY_LEFT");
+    SetRect(&monitors[1].info.rcMonitor, 0, 0, 1920, 1080);
+
+    wcscpy(monitors[2].info.szDevice, L"\\\\.\\DISPLAY_RIGHT_TOP");
+    SetRect(&monitors[2].info.rcMonitor, 1920, -1080, 3840, 0);
+
+    qsort(monitors, 3, sizeof(monitors[0]), fs_monitor_order);
+    CHECK(!wcscmp(monitors[0].info.szDevice, L"\\\\.\\DISPLAY_LEFT"), "spatial order: left screen is first");
+    CHECK(!wcscmp(monitors[1].info.szDevice, L"\\\\.\\DISPLAY_RIGHT_TOP"), "spatial order: top-right screen is second");
+    CHECK(!wcscmp(monitors[2].info.szDevice, L"\\\\.\\DISPLAY_RIGHT_BOT"), "spatial order: bottom-right screen is third");
+}
 static void test_signature(void) {
     FullscreenView view;
     FullscreenSignatureDraft draft = {0};
@@ -611,6 +658,7 @@ int wmain(int argc, wchar_t **argv) {
     CHECK(!fs_active && !fs_count, "click exits all overlays");
 
     test_screen_selection();
+    test_monitor_ordering();
     test_signature();
 
     /* Test right click toggle and mouse hover HUD prompt in fullscreen */
