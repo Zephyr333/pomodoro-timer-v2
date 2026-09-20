@@ -49,17 +49,19 @@ typedef struct {
 } FullscreenFontOption;
 
 static const FullscreenFontOption fs_mode_fonts[] = {
-    {L"Consolas (等宽代码)", L"Consolas"},
-    {L"Bahnschrift (数码几何)", L"Bahnschrift"},
     {L"Segoe UI (现代简洁)", L"Segoe UI"},
+    {L"Bahnschrift (数码几何)", L"Bahnschrift"},
+    {L"Consolas (等宽代码)", L"Consolas"},
     {L"Arial (经典无衬线)", L"Arial"},
     {L"Georgia (复古衬线)", L"Georgia"},
+    {L"楷体 (人文书法)", L"KaiTi"},
+    {L"微软雅黑 (现代黑体)", L"Microsoft YaHei UI"},
 };
 #define FS_MODE_FONT_COUNT (sizeof(fs_mode_fonts) / sizeof(fs_mode_fonts[0]))
 
 static const FullscreenFontOption fs_signature_fonts[] = {
-    {L"微软雅黑 (现代黑体)", L"Microsoft YaHei UI"},
     {L"楷体 (人文书法)", L"KaiTi"},
+    {L"微软雅黑 (现代黑体)", L"Microsoft YaHei UI"},
     {L"宋体 (典雅报章)", L"SimSun"},
     {L"仿宋 (清秀工整)", L"FangSong"},
     {L"Segoe UI (西文现代)", L"Segoe UI"},
@@ -84,7 +86,7 @@ static const FullscreenScaleOption fs_scale_options[] = {
 
 static const int fs_default_scales[FS_COLOR_COUNT] = {100, 100, 100, 100, 100, 100};
 static const wchar_t *fs_default_fonts[FS_COLOR_COUNT] = {
-    L"Consolas", L"Consolas", L"Consolas", L"Consolas", L"Consolas", L"Microsoft YaHei UI"
+    L"Segoe UI", L"Segoe UI", L"Segoe UI", L"Segoe UI", L"Segoe UI", L"KaiTi"
 };
 static const char *fs_scale_keys[FS_COLOR_COUNT] = {
     "\"fullscreen_focus_scale\"", "\"fullscreen_break_scale\"",
@@ -224,11 +226,11 @@ static void fs_read_view(FullscreenView *view) {
     int color_index = overtime ? 4 : fs_mode_color(mode);
     fs_format_time(view->time, 32, seconds, overtime);
     view->color = settings.fullscreen_colors[color_index];
-    wcscpy(view->font, settings.fullscreen_fonts[color_index][0] ? settings.fullscreen_fonts[color_index] : L"Consolas");
+    wcscpy(view->font, settings.fullscreen_fonts[color_index][0] ? settings.fullscreen_fonts[color_index] : L"Segoe UI");
     view->scale = settings.fullscreen_scales[color_index] > 0 ? settings.fullscreen_scales[color_index] : 100;
     view->show_text = settings.fullscreen_show_text;
     view->signature_color = settings.fullscreen_colors[5];
-    wcscpy(view->signature_font, settings.fullscreen_fonts[5][0] ? settings.fullscreen_fonts[5] : L"Microsoft YaHei UI");
+    wcscpy(view->signature_font, settings.fullscreen_fonts[5][0] ? settings.fullscreen_fonts[5] : L"KaiTi");
     view->signature_scale = settings.fullscreen_scales[5] > 0 ? settings.fullscreen_scales[5] : 100;
     if (settings.fullscreen_show_signature) wcscpy(view->signature, settings.fullscreen_signature);
 }
@@ -355,12 +357,13 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
     int base_size = max(8, min(height / 4, width / 6));
     int scale = view->scale > 0 ? view->scale : 100;
     int size = max(8, MulDiv(base_size, scale, 100));
-    int label_size = max(7, min(height / 32, width / 36));
-    int base_sig_size = max(label_size + 1, MulDiv(label_size, 6, 5));
+    int base_label_size = max(7, min(height / 32, width / 36));
+    int label_size = max(6, MulDiv(base_label_size, scale, 100));
+    int base_sig_size = max(base_label_size + 2, MulDiv(base_label_size, 42, 25));
     int sig_scale = view->signature_scale > 0 ? view->signature_scale : 100;
     int signature_size = max(6, MulDiv(base_sig_size, sig_scale, 100));
-    const wchar_t *digit_font = view->font[0] ? view->font : L"Consolas";
-    const wchar_t *sig_font = view->signature_font[0] ? view->signature_font : L"Microsoft YaHei UI";
+    const wchar_t *digit_font = view->font[0] ? view->font : L"Segoe UI";
+    const wchar_t *sig_font = view->signature_font[0] ? view->signature_font : L"KaiTi";
     int gap = max(4, height / 60), signature_height = 0, status_height = 0, total, top;
     HFONT digits, label, signature = NULL;
     HGDIOBJ previous;
@@ -401,7 +404,7 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
     }
     if (view->signature[0]) label_size = min(label_size, max(1, signature_size * 5 / 6));
     label = CreateFontW(-label_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, digit_font);
     if (view->show_text) status_height = label_size * 3 / 2;
     total = measured.cy + (status_height ? gap + status_height : 0) + (signature_height ? gap + signature_height : 0);
     top = bounds.top + (height - total) / 2;
@@ -848,7 +851,7 @@ static void fs_update_signature_preview_font(HWND dialog, FullscreenSignatureDra
     if (draft->preview_font) DeleteObject(draft->preview_font);
     draft->preview_font = CreateFontW(-MulDiv(points, dpi_y, 72), 0, 0, 0, FW_NORMAL,
         FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        ANTIALIASED_QUALITY, DEFAULT_PITCH, draft->font[0] ? draft->font : L"Microsoft YaHei UI");
+        ANTIALIASED_QUALITY, DEFAULT_PITCH, draft->font[0] ? draft->font : L"KaiTi");
     SendMessageW(control, WM_SETFONT, (WPARAM)draft->preview_font, TRUE);
     GetDlgItemTextW(dialog, IDC_FS_SIGNATURE, draft->text, FS_SIGNATURE_CAPACITY);
     fs_update_local_preview(dialog, IDC_FS_SIGNATURE_PREVIEW, draft->text[0] ? draft->text : fs_signature_sample());
@@ -988,7 +991,7 @@ static void fs_show_signature(HWND owner) {
     wcscpy(draft.text, settings.fullscreen_signature);
     draft.color = settings.fullscreen_colors[5];
     draft.scale = settings.fullscreen_scales[5] > 0 ? settings.fullscreen_scales[5] : 100;
-    wcscpy(draft.font, settings.fullscreen_fonts[5][0] ? settings.fullscreen_fonts[5] : L"Microsoft YaHei UI");
+    wcscpy(draft.font, settings.fullscreen_fonts[5][0] ? settings.fullscreen_fonts[5] : L"KaiTi");
     fs_signature_draft = &draft;
     DialogBoxParamW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDD_FULLSCREEN_SIGNATURE), owner,
         FullscreenSignatureDlgProc, (LPARAM)&draft);
@@ -1087,7 +1090,7 @@ static void fs_update_color_preview_font(HWND dialog, FullscreenColorDraft *draf
     if (draft->preview_font) DeleteObject(draft->preview_font);
     draft->preview_font = CreateFontW(-MulDiv(points, dpi_y, 72), 0, 0, 0, FW_NORMAL,
         FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        ANTIALIASED_QUALITY, DEFAULT_PITCH, draft->font[0] ? draft->font : L"Consolas");
+        ANTIALIASED_QUALITY, DEFAULT_PITCH, draft->font[0] ? draft->font : L"Segoe UI");
     SendMessageW(control, WM_SETFONT, (WPARAM)draft->preview_font, TRUE);
     fs_update_local_preview(dialog, IDC_FS_PREVIEW_FIRST, fs_mode_sample_time(draft->index));
     InvalidateRect(control, NULL, TRUE);
@@ -1197,7 +1200,7 @@ static void fs_show_color(HWND owner, int index) {
     draft.index = index;
     draft.color = settings.fullscreen_colors[index];
     draft.scale = settings.fullscreen_scales[index] > 0 ? settings.fullscreen_scales[index] : 100;
-    wcscpy(draft.font, settings.fullscreen_fonts[index][0] ? settings.fullscreen_fonts[index] : L"Consolas");
+    wcscpy(draft.font, settings.fullscreen_fonts[index][0] ? settings.fullscreen_fonts[index] : L"Segoe UI");
     DialogBoxParamW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDD_FULLSCREEN_COLORS), owner, FullscreenColorsDlgProc, (LPARAM)&draft);
     if (fs_preview_active) fs_end_preview();
     if (fs_active && fs_count) { SetForegroundWindow(fs_windows[0]); SetFocus(fs_windows[0]); }

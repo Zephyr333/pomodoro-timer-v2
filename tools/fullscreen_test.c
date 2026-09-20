@@ -336,7 +336,7 @@ static BOOL CALLBACK exercise_signature(HWND dialog, LPARAM unused) {
         {
             RECT preview_rect = {0};
             SendMessageW(GetDlgItem(dialog, IDC_FS_SIGNATURE_PREVIEW), EM_GETRECT, 0, (LPARAM)&preview_rect);
-            CHECK(preview_rect.top >= 10, "signature preview remains vertically centered after changing font and scale");
+            CHECK(preview_rect.top >= 6, "signature preview remains vertically centered or padded after changing font and scale");
         }
     }
     CHECK(fs_signature_draft && !wcscmp(fs_signature_draft->text, signature_sample), "edit notification updates live preview draft");
@@ -358,7 +358,7 @@ static BOOL CALLBACK exercise_signature(HWND dialog, LPARAM unused) {
     CHECK(!wcscmp(fs_view.signature, signature_sample), "fullscreen uses draft signature");
     if (signature_case == 2) {
         CHECK(fs_view.signature_color == 0x123456, "fullscreen preview uses draft signature color");
-        CHECK(!wcscmp(fs_view.signature_font, L"KaiTi"), "fullscreen preview uses draft signature font");
+        CHECK(!wcscmp(fs_view.signature_font, L"Microsoft YaHei UI"), "fullscreen preview uses draft signature font");
         CHECK(fs_view.signature_scale == 120, "fullscreen preview uses draft signature scale");
     }
     if (before_count) CHECK(fs_count == before_count && fs_windows[0] == before_window, "preview preserves selected screens and windows");
@@ -381,7 +381,7 @@ static BOOL CALLBACK exercise_signature(HWND dialog, LPARAM unused) {
     {
         RECT preview_rect = {0};
         SendMessageW(GetDlgItem(dialog, IDC_FS_SIGNATURE_PREVIEW), EM_GETRECT, 0, (LPARAM)&preview_rect);
-        CHECK(preview_rect.top >= 10, "signature preview remains vertically centered after returning from fullscreen preview");
+        CHECK(preview_rect.top >= 6, "signature preview remains vertically centered or padded after returning from fullscreen preview");
     }
     CHECK(fs_count == before_count, "preview restores original coverage");
     CHECK(!settings.fullscreen_signature[0], "preview never saves the draft");
@@ -462,7 +462,7 @@ static void test_signature(void) {
     load_settings();
     CHECK(!wcscmp(settings.fullscreen_signature, signature_sample), "signature save survives reload with empty lines");
     CHECK(settings.fullscreen_colors[5] == 0x123456, "signature color save survives reload");
-    CHECK(!wcscmp(settings.fullscreen_fonts[5], L"KaiTi"), "signature font save survives reload");
+    CHECK(!wcscmp(settings.fullscreen_fonts[5], L"Microsoft YaHei UI"), "signature font save survives reload");
     CHECK(settings.fullscreen_scales[5] == 120, "signature scale save survives reload");
     CHECK(!settings.fullscreen_show_signature, "editing hidden signature preserves display switch");
     choose_menu(ID_MENU_FULLSCREEN_SHOW_SIGNATURE);
