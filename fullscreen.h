@@ -538,13 +538,19 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
     int is_portrait = height > width;
     int base_size = is_portrait ? max(8, min(height / 5, width * 10 / 35))
                                 : max(8, min(height / 4, width / 6));
-    int scale = view->scale > 0 ? view->scale : 100;
-    int size = max(8, MulDiv(base_size, scale, 100));
     int base_label_size = is_portrait ? max(7, min(height / 32, base_size / 8))
                                       : max(7, min(height / 32, width / 36));
-    int label_size = max(6, MulDiv(base_label_size, scale, 100));
     int base_sig_size = is_portrait ? max(base_label_size + 2, base_size * 20 / 100)
                                     : max(base_label_size + 2, MulDiv(base_label_size, 42, 25));
+
+    /* The old 120% size is now the new 100% baseline for all text. */
+    base_size = MulDiv(base_size, 120, 100);
+    base_label_size = MulDiv(base_label_size, 120, 100);
+    base_sig_size = MulDiv(base_sig_size, 120, 100);
+
+    int scale = view->scale > 0 ? view->scale : 100;
+    int size = max(8, MulDiv(base_size, scale, 100));
+    int label_size = max(6, MulDiv(base_label_size, scale, 100));
     int sig_scale = view->signature_scale > 0 ? view->signature_scale : 100;
     int signature_size = max(6, MulDiv(base_sig_size, sig_scale, 100));
     const wchar_t *digit_font = view->font[0] ? view->font : L"Segoe UI";
@@ -630,7 +636,7 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
     DeleteObject(digits); DeleteObject(label);
     if (signature) DeleteObject(signature);
     if (hud) {
-        int hud_size = max(8, min(height / 60, width / 54));
+        int hud_size = max(8, MulDiv(min(height / 60, width / 54), 120, 100));
         HFONT font = CreateFontW(-hud_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
         SelectObject(dc, font);
@@ -1055,7 +1061,7 @@ static void fs_update_signature_preview_font(HWND dialog, FullscreenSignatureDra
     HWND control = GetDlgItem(dialog, IDC_FS_SIGNATURE_PREVIEW);
     HDC dc = GetDC(control);
     int dpi_y = GetDeviceCaps(dc, LOGPIXELSY);
-    int points = MulDiv(14, draft->scale > 0 ? draft->scale : 100, 100);
+    int points = MulDiv(17, draft->scale > 0 ? draft->scale : 100, 100);
     ReleaseDC(control, dc);
     if (draft->preview_font) DeleteObject(draft->preview_font);
     draft->preview_font = CreateFontW(-MulDiv(points, dpi_y, 72), 0, 0, 0, FW_NORMAL,
@@ -1294,7 +1300,7 @@ static void fs_update_color_preview_font(HWND dialog, FullscreenColorDraft *draf
     HWND control = GetDlgItem(dialog, IDC_FS_PREVIEW_FIRST);
     HDC dc = GetDC(control);
     int dpi_y = GetDeviceCaps(dc, LOGPIXELSY);
-    int points = MulDiv(26, draft->scale > 0 ? draft->scale : 100, 100);
+    int points = MulDiv(31, draft->scale > 0 ? draft->scale : 100, 100);
     ReleaseDC(control, dc);
     if (draft->preview_font) DeleteObject(draft->preview_font);
     draft->preview_font = CreateFontW(-MulDiv(points, dpi_y, 72), 0, 0, 0, FW_NORMAL,
