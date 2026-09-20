@@ -35,6 +35,8 @@ static BOOL WINAPI test_track_popup_menu(HMENU menu, UINT flags, int x, int y, i
     CHECK(!!(GetMenuState(fullscreen, ID_MENU_FULLSCREEN_EXIT, MF_BYCOMMAND) & MF_GRAYED) == !fs_active, "exit enabled only while fullscreen");
     GetMenuStringW(fullscreen, ID_MENU_FULLSCREEN_SHOW_TEXT, label, 80, MF_BYCOMMAND);
     CHECK(!wcscmp(label, L"显示状态"), "state visibility has concise unambiguous label");
+    GetMenuStringW(fullscreen, ID_MENU_FULLSCREEN_SHOW_MOUSE_TIPS, label, 80, MF_BYCOMMAND);
+    CHECK(!wcscmp(label, L"显示鼠标提示"), "mouse tips visibility has concise unambiguous label");
     CHECK(GetMenuState(GetSubMenu(menu, 9), ID_MENU_FULLSCREEN_SHOW_TEXT, MF_BYCOMMAND) == (UINT)-1, "fullscreen state removed from preferences");
     for (i = 0; i < (int)fs_menu_monitors.count; ++i)
         CHECK(!!(GetMenuState(fullscreen, ID_MENU_SCREEN_FIRST + i, MF_BYCOMMAND) & MF_CHECKED) ==
@@ -512,7 +514,7 @@ static void test_signature(void) {
     CHECK(!settings_json_valid("{\"pomodoro_duration\":42,\"pomodoro_count\":3,\"fullscreen_signature\":\"truncated"), "truncated settings rejected for recovery");
     CHECK(!settings_json_valid("{\"pomodoro_duration\":42,\"pomodoro_count\":3}garbage"), "trailing corruption rejected");
     CHECK(settings_json_valid("\xEF\xBB\xBF{\"pomodoro_duration\":42,\"pomodoro_count\":3}"), "UTF8 BOM settings remain compatible");
-    settings.fullscreen_signature[0] = 0; settings.fullscreen_show_text = 1; settings.fullscreen_show_signature = 1;
+    settings.fullscreen_signature[0] = 0; settings.fullscreen_show_text = 1; settings.fullscreen_show_signature = 1; settings.fullscreen_show_mouse_tips = 1;
     save_settings();
 }
 

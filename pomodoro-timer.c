@@ -316,6 +316,7 @@ typedef struct {
     wchar_t fullscreen_fonts[FS_COLOR_COUNT][32];
     int fullscreen_show_text;
     int fullscreen_show_signature;
+    int fullscreen_show_mouse_tips;
     wchar_t fullscreen_signature[FS_SIGNATURE_CAPACITY];
 } TimerSettings;
 
@@ -1189,6 +1190,7 @@ static void reset_defaults_keep_data(void) {
     }
     settings.fullscreen_show_text = 1;
     settings.fullscreen_show_signature = 1;
+    settings.fullscreen_show_mouse_tips = 1;
     settings.fullscreen_signature[0] = 0;
 
     if (!is_running && !is_paused) {
@@ -2122,7 +2124,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.19");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.20");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -3242,6 +3244,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         if (!save_settings()) settings.fullscreen_show_signature = !settings.fullscreen_show_signature;
                         fs_refresh();
                         break;
+                    case ID_MENU_FULLSCREEN_SHOW_MOUSE_TIPS:
+                        settings.fullscreen_show_mouse_tips = !settings.fullscreen_show_mouse_tips;
+                        if (!save_settings()) settings.fullscreen_show_mouse_tips = !settings.fullscreen_show_mouse_tips;
+                        if (fs_active) {
+                            if (!settings.fullscreen_show_mouse_tips) {
+                                fs_hud_visible = 0;
+                                if (fs_count > 0) KillTimer(fs_windows[0], ID_FS_HUD_TIMER);
+                            }
+                            fs_refresh();
+                        }
+                        break;
                     case ID_MENU_COLOR_RESET:
                         fs_save_palette(fs_default_colors);
                         break;
@@ -3762,6 +3775,7 @@ void load_settings() {
     }
     settings.fullscreen_show_text = 1;
     settings.fullscreen_show_signature = 1;
+    settings.fullscreen_show_mouse_tips = 1;
     settings.fullscreen_signature[0] = 0;
     pomodoro_count = 0;
     idle_mode = IDLE_POMODORO;
@@ -3801,6 +3815,7 @@ void load_settings() {
             }
             settings.fullscreen_show_text = extract_json_int(buf, "\"fullscreen_show_text\"", 1) ? 1 : 0;
             settings.fullscreen_show_signature = extract_json_int(buf, "\"fullscreen_show_signature\"", 1) ? 1 : 0;
+            settings.fullscreen_show_mouse_tips = extract_json_int(buf, "\"fullscreen_show_mouse_tips\"", 1) ? 1 : 0;
             {
                 const char *signature = settings_json_find(buf, "\"fullscreen_signature\"");
                 if (!signature || !settings_json_string(&signature, settings.fullscreen_signature, FS_SIGNATURE_CAPACITY) ||
@@ -3851,7 +3866,7 @@ int save_settings(void) {
 
     FILE* fp = _wfopen(g_settings_tmp_path, L"w");
     if (fp) {
-        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"enable_overtime_count_up\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d,\"fullscreen_focus_color\":%d,\"fullscreen_break_color\":%d,\"fullscreen_count_up_color\":%d,\"fullscreen_custom_color\":%d,\"fullscreen_overtime_color\":%d,\"fullscreen_signature_color\":%d,\"fullscreen_focus_scale\":%d,\"fullscreen_break_scale\":%d,\"fullscreen_count_up_scale\":%d,\"fullscreen_custom_scale\":%d,\"fullscreen_overtime_scale\":%d,\"fullscreen_signature_scale\":%d,\"fullscreen_show_text\":%d,\"fullscreen_show_signature\":%d",
+        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"enable_overtime_count_up\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d,\"fullscreen_focus_color\":%d,\"fullscreen_break_color\":%d,\"fullscreen_count_up_color\":%d,\"fullscreen_custom_color\":%d,\"fullscreen_overtime_color\":%d,\"fullscreen_signature_color\":%d,\"fullscreen_focus_scale\":%d,\"fullscreen_break_scale\":%d,\"fullscreen_count_up_scale\":%d,\"fullscreen_custom_scale\":%d,\"fullscreen_overtime_scale\":%d,\"fullscreen_signature_scale\":%d,\"fullscreen_show_text\":%d,\"fullscreen_show_signature\":%d,\"fullscreen_show_mouse_tips\":%d",
             longDuration, longDuration, settings.long_pomodoro_count, settings.short_pomodoro_duration,
             settings.short_break_duration, settings.long_break_duration, settings.custom_duration,
             settings.adjust_block_minutes, settings.toast_auto_collapse_seconds, settings.enable_clock_sound,
@@ -3861,7 +3876,7 @@ int save_settings(void) {
             settings.fullscreen_colors[3], settings.fullscreen_colors[4], settings.fullscreen_colors[5],
             settings.fullscreen_scales[0], settings.fullscreen_scales[1], settings.fullscreen_scales[2],
             settings.fullscreen_scales[3], settings.fullscreen_scales[4], settings.fullscreen_scales[5],
-            settings.fullscreen_show_text, settings.fullscreen_show_signature) >= 0;
+            settings.fullscreen_show_text, settings.fullscreen_show_signature, settings.fullscreen_show_mouse_tips) >= 0;
         {
             int i;
             for (i = 0; writeOk && i < FS_COLOR_COUNT; ++i) {

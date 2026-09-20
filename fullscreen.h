@@ -9,6 +9,7 @@
 #define ID_MENU_FULLSCREEN_SIGNATURE 357
 #define ID_MENU_SIGNATURE_COLOR 358
 #define ID_MENU_FULLSCREEN_SHOW_SIGNATURE 359
+#define ID_MENU_FULLSCREEN_SHOW_MOUSE_TIPS 360
 #define IDC_FS_COLOR_FULL 5132
 #define ID_MENU_SCREEN_FIRST 6000
 #define FS_MAX_MONITORS 64
@@ -635,7 +636,7 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
     SelectObject(dc, previous);
     DeleteObject(digits); DeleteObject(label);
     if (signature) DeleteObject(signature);
-    if (hud) {
+    if (hud && (settings.fullscreen_show_mouse_tips || fs_preview_active)) {
         int hud_size = max(8, MulDiv(min(height / 60, width / 54), 120, 100));
         HFONT font = CreateFontW(-hud_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
@@ -678,7 +679,7 @@ static LRESULT CALLBACK FullscreenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             return 0;
         case WM_ERASEBKGND: return 1;
         case WM_SETCURSOR:
-            if (fs_hud_visible) {
+            if (fs_hud_visible && (settings.fullscreen_show_mouse_tips || fs_preview_active)) {
                 SetCursor(LoadCursor(NULL, IDC_ARROW));
                 return TRUE;
             }
@@ -690,11 +691,13 @@ static LRESULT CALLBACK FullscreenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             if (pt.x != fs_last_cursor.x || pt.y != fs_last_cursor.y) {
                 size_t i;
                 fs_last_cursor = pt;
-                if (!fs_hud_visible) {
-                    fs_hud_visible = 1;
-                    for (i = 0; i < fs_count; ++i) InvalidateRect(fs_windows[i], NULL, FALSE);
+                if (settings.fullscreen_show_mouse_tips || fs_preview_active) {
+                    if (!fs_hud_visible) {
+                        fs_hud_visible = 1;
+                        for (i = 0; i < fs_count; ++i) InvalidateRect(fs_windows[i], NULL, FALSE);
+                    }
+                    if (fs_count > 0) SetTimer(fs_windows[0], ID_FS_HUD_TIMER, 1500, NULL);
                 }
-                if (fs_count > 0) SetTimer(fs_windows[0], ID_FS_HUD_TIMER, 1500, NULL);
             }
             return 0;
         }
@@ -716,10 +719,12 @@ static LRESULT CALLBACK FullscreenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             return 0;
         case WM_RBUTTONUP:
             if (fs_preview_active) return 0;
-            if (!fs_hud_visible) {
-                fs_hud_visible = 1;
+            if (settings.fullscreen_show_mouse_tips) {
+                if (!fs_hud_visible) {
+                    fs_hud_visible = 1;
+                }
+                if (fs_count > 0) SetTimer(fs_windows[0], ID_FS_HUD_TIMER, 1500, NULL);
             }
-            if (fs_count > 0) SetTimer(fs_windows[0], ID_FS_HUD_TIMER, 1500, NULL);
             SendMessageW(g_main_hwnd, WM_USER + 1, 0, WM_LBUTTONUP);
             fs_refresh();
             return 0;
@@ -931,6 +936,7 @@ static HMENU fs_create_menu(void) {
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING | (settings.fullscreen_show_text ? MF_CHECKED : 0), ID_MENU_FULLSCREEN_SHOW_TEXT, L"显示状态");
     AppendMenuW(menu, MF_STRING | (settings.fullscreen_show_signature ? MF_CHECKED : 0), ID_MENU_FULLSCREEN_SHOW_SIGNATURE, L"显示签名");
+    AppendMenuW(menu, MF_STRING | (settings.fullscreen_show_mouse_tips ? MF_CHECKED : 0), ID_MENU_FULLSCREEN_SHOW_MOUSE_TIPS, L"显示鼠标提示");
     return menu;
 }
 
