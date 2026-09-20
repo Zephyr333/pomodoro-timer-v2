@@ -3907,6 +3907,16 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     (void)hPrevInstance;
     (void)lpCmdLine;
     (void)nCmdShow;
+
+    {
+        typedef BOOL (WINAPI *SetProcessDpiContextFn)(HANDLE);
+        SetProcessDpiContextFn setContext = (SetProcessDpiContextFn)(void*)GetProcAddress(
+            GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext");
+        if (setContext) {
+            setContext((HANDLE)(INT_PTR)-4);
+        }
+    }
+
     HANDLE hEvent = CreateEventW(NULL, TRUE, FALSE, L"PomodoroTimerEvent");
     if (!hEvent) {
         MessageBoxW(NULL, L"无法创建程序单实例标识。", L"启动失败", MB_OK | MB_ICONERROR);
