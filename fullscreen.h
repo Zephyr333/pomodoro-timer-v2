@@ -35,6 +35,7 @@
 #define ID_FS_HUD_TIMER 4004
 #define WM_FS_COMPLETED (WM_APP + 102)
 #define WM_FS_LAYOUT (WM_APP + 103)
+#define WM_FS_MAINTAIN_LAYER (WM_APP + 104)
 
 /* Persist RGB values, not Windows' byte-reversed COLORREF representation. */
 static const int fs_default_colors[FS_COLOR_COUNT] = {0x7F8C98, 0x829889, 0x8C86A3, 0xA39182, 0xC79A52, 0xC4B8A8};
@@ -157,6 +158,12 @@ static POINT fs_last_cursor;
 #ifndef WINEVENT_SKIPOWNPROCESS
 #define WINEVENT_SKIPOWNPROCESS 0x0002
 #endif
+#ifndef OBJID_WINDOW
+#define OBJID_WINDOW 0x00000000
+#endif
+#ifndef CHILDID_SELF
+#define CHILDID_SELF 0
+#endif
 
 static HWINEVENTHOOK fs_foreground_hook;
 static HWINEVENTHOOK fs_show_hook;
@@ -164,11 +171,14 @@ static HWND *fs_hidden_windows;
 static size_t fs_hidden_count;
 static size_t fs_hidden_capacity;
 static DWORD fs_last_suppress_tick;
+static DWORD fs_last_topmost_tick;
+static volatile LONG fs_maintain_scheduled;
 
 static void fs_maintain_layer(int force_suppress);
 static void fs_start_guard(void);
 static void fs_stop_guard(void);
 static void fs_restore_hidden_windows(void);
+
 
 static COLORREF fs_colorref(int rgb) {
     return RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
@@ -283,7 +293,7 @@ static void fs_enforce_topmost(void) {
     for (i = 0; i < fs_count; ++i) {
         if (fs_windows[i] && IsWindow(fs_windows[i])) {
             SetWindowPos(fs_windows[i], HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
         }
     }
 }
@@ -326,9 +336,12 @@ static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
         if (item) {
             RECT intersection, mon_rect = item->info.rcMonitor;
             if (IntersectRect(&intersection, &rect, &mon_rect)) {
-                ShowWindow(hwnd, SW_HIDE);
-                fs_record_hidden_window(hwnd);
-                break;
+                if ((intersection.right - intersection.left) > 0 &&
+                    (intersection.bottom - intersection.top) > 0) {
+                    ShowWindow(hwnd, SW_HIDE);
+                    fs_record_hidden_window(hwnd);
+                    break;
+                }
             }
         }
     }
@@ -356,9 +369,12 @@ static void fs_restore_hidden_windows(void) {
 static void fs_maintain_layer(int force_suppress) {
     DWORD now;
     if (!fs_active || !fs_count) return;
-    fs_enforce_topmost();
     now = GetTickCount();
-    if (force_suppress || (now - fs_last_suppress_tick >= 250)) {
+    if (force_suppress || (now - fs_last_topmost_tick >= 250)) {
+        fs_enforce_topmost();
+        fs_last_topmost_tick = now;
+    }
+    if (force_suppress || (now - fs_last_suppress_tick >= 300)) {
         fs_suppress_competing_windows();
         fs_last_suppress_tick = now;
     }
@@ -366,10 +382,14 @@ static void fs_maintain_layer(int force_suppress) {
 
 static void CALLBACK fs_winevent_proc(HWINEVENTHOOK hook, DWORD event, HWND hwnd,
     LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
-    (void)hook; (void)event; (void)hwnd; (void)idObject; (void)idChild;
-    (void)dwEventThread; (void)dwmsEventTime;
-    if (fs_active && fs_count) {
-        fs_maintain_layer(1);
+    (void)hook; (void)event; (void)hwnd; (void)dwEventThread; (void)dwmsEventTime;
+    if (idObject != (LONG)OBJID_WINDOW || idChild != CHILDID_SELF) return;
+    if (!fs_active || !fs_count) return;
+    if (InterlockedExchange(&fs_maintain_scheduled, 1) == 1) return;
+    if (g_main_hwnd && IsWindow(g_main_hwnd)) {
+        PostMessageW(g_main_hwnd, WM_FS_MAINTAIN_LAYER, 1, 0);
+    } else {
+        InterlockedExchange(&fs_maintain_scheduled, 0);
     }
 }
 
@@ -387,6 +407,8 @@ static void fs_start_guard(void) {
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     }
     fs_last_suppress_tick = 0;
+    fs_last_topmost_tick = 0;
+    fs_maintain_scheduled = 0;
     fs_maintain_layer(1);
 }
 
@@ -399,6 +421,7 @@ static void fs_stop_guard(void) {
         UnhookWinEvent(fs_show_hook);
         fs_show_hook = NULL;
     }
+    fs_maintain_scheduled = 0;
     fs_restore_hidden_windows();
 }
 

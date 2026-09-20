@@ -3635,6 +3635,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 fs_refresh();
             }
             return 0;
+        case WM_FS_MAINTAIN_LAYER:
+            fs_maintain_layer((int)wParam);
+            InterlockedExchange(&fs_maintain_scheduled, 0);
+            return 0;
         case WM_DISPLAYCHANGE:
         case WM_FS_LAYOUT:
             if (fs_active) SetTimer(hwnd, ID_FS_LAYOUT, 200, NULL);
