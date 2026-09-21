@@ -2290,14 +2290,14 @@ static void toast_layout_children(HWND hwnd, UINT dpi) {
     int closeSize = toast_scale(22, dpi);
     int margin = toast_scale(8, dpi);
     int gap = toast_scale(4, dpi);
-    int smallFontSize = toast_scale(12, dpi);
+    int smallFontSize = -MulDiv(11, (int)dpi, 72);
     int btnFontSize = toast_scale(17, dpi);
 
     if (g_hToastSmallBtnFont) {
         DeleteObject(g_hToastSmallBtnFont);
         g_hToastSmallBtnFont = NULL;
     }
-    g_hToastSmallBtnFont = CreateFontW(smallFontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    g_hToastSmallBtnFont = CreateFontW(smallFontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
     if (g_hToastBtnFont) {
@@ -2506,10 +2506,10 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (g_toast_collapsed) {
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, RGB(255, 255, 255));
-                int collapsedFontSize = toast_scale(13, dpi);
-                HFONT hFont = CreateFontW(collapsedFontSize, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                int collapsedFontSize = -MulDiv(10, (int)dpi, 72);
+                HFONT hFont = CreateFontW(collapsedFontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                         CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                                         CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
                 HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
                 DrawTextW(hdc, L"提醒", -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 SelectObject(hdc, hOldFont);
