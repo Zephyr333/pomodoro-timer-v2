@@ -2197,6 +2197,113 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     return FALSE;
 }
 
+// Toast DPI and layout helpers
+static HFONT g_hToastBtnFont = NULL;
+static HFONT g_hToastSmallBtnFont = NULL;
+
+static UINT toast_get_monitor_dpi(HMONITOR hMon) {
+    typedef HRESULT (WINAPI *GetDpiForMonitorFn)(HMONITOR, int, UINT*, UINT*);
+    static GetDpiForMonitorFn pfnGetDpiForMonitor = NULL;
+    static BOOL resolved = FALSE;
+    if (!resolved) {
+        HMODULE hShcore = LoadLibraryW(L"Shcore.dll");
+        if (hShcore) {
+            pfnGetDpiForMonitor = (GetDpiForMonitorFn)(void*)GetProcAddress(hShcore, "GetDpiForMonitor");
+        }
+        resolved = TRUE;
+    }
+    if (pfnGetDpiForMonitor && hMon) {
+        UINT dx = 0, dy = 0;
+        if (SUCCEEDED(pfnGetDpiForMonitor(hMon, 0 /* MDT_EFFECTIVE_DPI */, &dx, &dy)) && dx > 0) {
+            return dx;
+        }
+    }
+    return 96;
+}
+
+static UINT toast_get_dpi(HWND hwnd) {
+    typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
+    static GetDpiForWindowFn pfnGetDpiForWindow = NULL;
+    static BOOL resolved = FALSE;
+    if (!resolved) {
+        pfnGetDpiForWindow = (GetDpiForWindowFn)(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+        resolved = TRUE;
+    }
+    if (hwnd && pfnGetDpiForWindow) {
+        UINT dpi = pfnGetDpiForWindow(hwnd);
+        if (dpi > 0) return dpi;
+    }
+    HMONITOR hMon = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+                         : MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    UINT dpi = toast_get_monitor_dpi(hMon);
+    if (dpi > 0) return dpi;
+    return 96;
+}
+
+static inline int toast_scale(int val, UINT dpi) {
+    return MulDiv(val, (int)(dpi ? dpi : 96), 96);
+}
+
+static void toast_layout_children(HWND hwnd, UINT dpi) {
+    RECT rect;
+    GetClientRect(hwnd, &rect);
+    int w = rect.right - rect.left;
+    int h = rect.bottom - rect.top;
+
+    int closeSize = toast_scale(22, dpi);
+    int margin = toast_scale(8, dpi);
+    int gap = toast_scale(4, dpi);
+    int smallFontSize = toast_scale(12, dpi);
+    int btnFontSize = toast_scale(17, dpi);
+
+    if (g_hToastSmallBtnFont) {
+        DeleteObject(g_hToastSmallBtnFont);
+        g_hToastSmallBtnFont = NULL;
+    }
+    g_hToastSmallBtnFont = CreateFontW(smallFontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+
+    if (g_hToastBtnFont) {
+        DeleteObject(g_hToastBtnFont);
+        g_hToastBtnFont = NULL;
+    }
+    g_hToastBtnFont = CreateFontW(btnFontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+
+    if (g_toast_collapsed) {
+        if (g_hToastButton) ShowWindow(g_hToastButton, SW_HIDE);
+        if (g_hToastCloseButton) ShowWindow(g_hToastCloseButton, SW_HIDE);
+        if (g_hToastCollapseButton) {
+            int btnX = (w - closeSize) / 2;
+            SetWindowPos(g_hToastCollapseButton, NULL, btnX, margin, closeSize, closeSize, SWP_NOZORDER | SWP_SHOWWINDOW);
+            SetWindowTextW(g_hToastCollapseButton, L">");
+            SendMessageW(g_hToastCollapseButton, WM_SETFONT, (WPARAM)g_hToastSmallBtnFont, TRUE);
+        }
+    } else {
+        if (g_hToastCloseButton) {
+            int closeX = w - closeSize - margin;
+            SetWindowPos(g_hToastCloseButton, NULL, closeX, margin, closeSize, closeSize, SWP_NOZORDER | SWP_SHOWWINDOW);
+            SendMessageW(g_hToastCloseButton, WM_SETFONT, (WPARAM)g_hToastSmallBtnFont, TRUE);
+        }
+        if (g_hToastCollapseButton) {
+            int closeX = w - closeSize - margin;
+            int collapseX = closeX - closeSize - gap;
+            SetWindowPos(g_hToastCollapseButton, NULL, collapseX, margin, closeSize, closeSize, SWP_NOZORDER | SWP_SHOWWINDOW);
+            SetWindowTextW(g_hToastCollapseButton, L"_");
+            SendMessageW(g_hToastCollapseButton, WM_SETFONT, (WPARAM)g_hToastSmallBtnFont, TRUE);
+        }
+        if (g_hToastButton) {
+            int btnW = toast_scale(200, dpi);
+            int btnH = toast_scale(40, dpi);
+            int btnBottomMargin = toast_scale(15, dpi);
+            int btnX = (w - btnW) / 2;
+            int btnY = h - btnH - btnBottomMargin;
+            SetWindowPos(g_hToastButton, NULL, btnX, btnY, btnW, btnH, SWP_NOZORDER | SWP_SHOWWINDOW);
+            SendMessageW(g_hToastButton, WM_SETFONT, (WPARAM)g_hToastBtnFont, TRUE);
+        }
+    }
+}
+
 // Toast window procedure
 LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -2224,35 +2331,33 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                  // Close button clicked
                  DestroyWindow(hwnd);
              } else if (LOWORD(wParam) == ID_TOAST_COLLAPSE && HIWORD(wParam) == BN_CLICKED) {
+                 UINT dpi = toast_get_dpi(hwnd);
                  if (g_toast_collapsed) {
                      int expandedWidth = g_toast_expanded_rect.right - g_toast_expanded_rect.left;
-                     int closeX;
+                     int expandedHeight = g_toast_expanded_rect.bottom - g_toast_expanded_rect.top;
+                     if (expandedWidth <= 0) expandedWidth = toast_scale(300, dpi);
+                     if (expandedHeight <= 0) expandedHeight = toast_scale(150, dpi);
                      g_toast_collapsed = 0;
                      SetWindowPos(hwnd, HWND_TOPMOST,
                          g_toast_expanded_rect.left,
                          g_toast_expanded_rect.top,
                          expandedWidth,
-                         g_toast_expanded_rect.bottom - g_toast_expanded_rect.top,
+                         expandedHeight,
                          SWP_SHOWWINDOW);
-                     if (g_hToastButton) ShowWindow(g_hToastButton, SW_SHOW);
-                     if (g_hToastCloseButton) ShowWindow(g_hToastCloseButton, SW_SHOW);
-                     closeX = expandedWidth - 22 - 8;
-                     if (g_hToastCloseButton) SetWindowPos(g_hToastCloseButton, NULL, closeX, 8, 22, 22, SWP_NOZORDER | SWP_SHOWWINDOW);
-                     if (g_hToastCollapseButton) SetWindowPos(g_hToastCollapseButton, NULL, closeX - 26, 8, 22, 22, SWP_NOZORDER | SWP_SHOWWINDOW);
-                     if (g_hToastCollapseButton) SetWindowTextW(g_hToastCollapseButton, L"_");
+                     toast_layout_children(hwnd, dpi);
                  } else {
                      GetWindowRect(hwnd, &g_toast_expanded_rect);
                      g_toast_collapsed = 1;
-                     if (g_hToastButton) ShowWindow(g_hToastButton, SW_HIDE);
-                     if (g_hToastCloseButton) ShowWindow(g_hToastCloseButton, SW_HIDE);
+                     int collapsedWidth = toast_scale(40, dpi);
+                     int expandedHeight = g_toast_expanded_rect.bottom - g_toast_expanded_rect.top;
+                     if (expandedHeight <= 0) expandedHeight = toast_scale(150, dpi);
                      SetWindowPos(hwnd, HWND_TOPMOST,
-                         g_toast_expanded_rect.right - 40,
+                         g_toast_expanded_rect.right - collapsedWidth,
                          g_toast_expanded_rect.top,
-                         40,
-                         g_toast_expanded_rect.bottom - g_toast_expanded_rect.top,
+                         collapsedWidth,
+                         expandedHeight,
                          SWP_SHOWWINDOW);
-                     if (g_hToastCollapseButton) SetWindowPos(g_hToastCollapseButton, NULL, 9, 8, 22, 22, SWP_NOZORDER | SWP_SHOWWINDOW);
-                     if (g_hToastCollapseButton) SetWindowTextW(g_hToastCollapseButton, L">");
+                     toast_layout_children(hwnd, dpi);
                  }
                  InvalidateRect(hwnd, NULL, TRUE);
              }
@@ -2267,6 +2372,14 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         case WM_DESTROY:
             KillTimer(hwnd, 1);
+            if (g_hToastBtnFont) {
+                DeleteObject(g_hToastBtnFont);
+                g_hToastBtnFont = NULL;
+            }
+            if (g_hToastSmallBtnFont) {
+                DeleteObject(g_hToastSmallBtnFont);
+                g_hToastSmallBtnFont = NULL;
+            }
             g_hToastWnd = NULL;
             g_hToastButton = NULL;
             g_hToastCloseButton = NULL;
@@ -2290,26 +2403,50 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_MOVE:
             {
                 RECT rc;
-                int expandedWidth;
-                int expandedHeight;
                 GetWindowRect(hwnd, &rc);
                 if (!g_toast_collapsed) {
                     g_toast_expanded_rect = rc;
                 } else {
-                    expandedWidth = g_toast_expanded_rect.right - g_toast_expanded_rect.left;
-                    expandedHeight = g_toast_expanded_rect.bottom - g_toast_expanded_rect.top;
-                    if (expandedWidth <= 0) expandedWidth = 300;
-                    if (expandedHeight <= 0) expandedHeight = 150;
-                    g_toast_expanded_rect.left = rc.left + 40 - expandedWidth;
+                    UINT dpi = toast_get_dpi(hwnd);
+                    int expandedWidth = g_toast_expanded_rect.right - g_toast_expanded_rect.left;
+                    int expandedHeight = g_toast_expanded_rect.bottom - g_toast_expanded_rect.top;
+                    if (expandedWidth <= 0) expandedWidth = toast_scale(300, dpi);
+                    if (expandedHeight <= 0) expandedHeight = toast_scale(150, dpi);
+                    int collapsedWidth = toast_scale(40, dpi);
+                    g_toast_expanded_rect.left = rc.left + collapsedWidth - expandedWidth;
                     g_toast_expanded_rect.top = rc.top;
                     g_toast_expanded_rect.right = g_toast_expanded_rect.left + expandedWidth;
                     g_toast_expanded_rect.bottom = rc.top + expandedHeight;
                 }
             }
             return 0;
+        case 0x02E0: /* WM_DPICHANGED */
+            {
+                UINT newDpi = LOWORD(wParam);
+                RECT* prc = (RECT*)lParam;
+                if (prc) {
+                    if (!g_toast_collapsed) {
+                        g_toast_expanded_rect = *prc;
+                        SetWindowPos(hwnd, NULL, prc->left, prc->top,
+                            prc->right - prc->left, prc->bottom - prc->top,
+                            SWP_NOZORDER | SWP_NOACTIVATE);
+                    } else {
+                        int collapsedWidth = toast_scale(40, newDpi);
+                        g_toast_expanded_rect = *prc;
+                        SetWindowPos(hwnd, NULL,
+                            prc->right - collapsedWidth, prc->top,
+                            collapsedWidth, prc->bottom - prc->top,
+                            SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
+                }
+                toast_layout_children(hwnd, newDpi);
+                InvalidateRect(hwnd, NULL, TRUE);
+            }
+            return 0;
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
+            UINT dpi = toast_get_dpi(hwnd);
 
             // Draw reddish background (use same red as the tray icon)
             RECT rect;
@@ -2319,7 +2456,9 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             DeleteObject(hBrush);
 
             // Draw subtle border (darker)
-            HPEN hPen = CreatePen(PS_SOLID, 2, RGB(100, 0, 0));
+            int borderWidth = toast_scale(2, dpi);
+            if (borderWidth < 1) borderWidth = 1;
+            HPEN hPen = CreatePen(PS_SOLID, borderWidth, RGB(100, 0, 0));
             HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
             HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
             Rectangle(hdc, 0, 0, rect.right, rect.bottom);
@@ -2330,16 +2469,28 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (g_toast_collapsed) {
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, RGB(255, 255, 255));
-                TextOutW(hdc, 8, (rect.bottom - 24) / 2, L"提醒", 2);
+                int collapsedFontSize = toast_scale(13, dpi);
+                HFONT hFont = CreateFontW(collapsedFontSize, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                         DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+                RECT textRc = rect;
+                textRc.top = toast_scale(30, dpi);
+                DrawTextW(hdc, L"提醒", -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(hdc, hOldFont);
+                DeleteObject(hFont);
             } else {
                 // Draw progress dots (4) above the action button
                 int totalDots = 4;
-                int dotR = 6; // radius
-                int spacing = 12;
+                int dotR = toast_scale(6, dpi); // radius
+                int spacing = toast_scale(12, dpi);
                 int dotDiameter = dotR * 2;
                 int totalWidth = totalDots * dotDiameter + (totalDots - 1) * spacing;
                 int startX = (rect.right - totalWidth) / 2;
-                int dotsY = rect.bottom - 40 - 15 - 16; // above button area (btnH=40, gap=15, dots_radius_space=16)
+                int btnH = toast_scale(40, dpi);
+                int btnMarginBottom = toast_scale(15, dpi);
+                int dotsMarginAboveBtn = toast_scale(16, dpi);
+                int dotsY = rect.bottom - btnH - btnMarginBottom - dotsMarginAboveBtn;
 
                 // Determine how many dots should be green: show up to 4 completed pomodoros
                 int greenCount = get_visible_dots(pomodoro_count);
@@ -2361,12 +2512,15 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 // Draw message text in white
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, RGB(255, 255, 255));
-                HFONT hFont = CreateFontW(20, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                int titleFontSize = toast_scale(20, dpi);
+                HFONT hFont = CreateFontW(titleFontSize, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                          DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
                 HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
 
-                RECT textRect = {15, 15, rect.right - 15, rect.bottom - 80};
+                int pad = toast_scale(15, dpi);
+                int bottomReserve = toast_scale(80, dpi);
+                RECT textRect = {pad, pad, rect.right - pad, rect.bottom - bottomReserve};
                 const wchar_t* message = (const wchar_t*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
                 if (message) {
                     DrawTextW(hdc, message, -1, &textRect, DT_LEFT | DT_WORDBREAK);
@@ -2425,34 +2579,40 @@ void ShowCompletionNotification(HWND hwnd, int completed_mode) {
     // Register toast window class if not already done
     RegisterToastWindowClass();
 
-    // Get taskbar position
+    // Get taskbar position & monitor
     RECT taskbarRect = {0};
     HWND taskbarWnd = FindWindowW(L"Shell_TrayWnd", NULL);
     if (taskbarWnd) {
         GetWindowRect(taskbarWnd, &taskbarRect);
     }
 
-    // Calculate toast position (above taskbar, right side)
-    int toastWidth = 300; // smaller width
-    int toastHeight = 150; // smaller height to match button
-    int toastScreenWidth = GetSystemMetrics(SM_CXSCREEN);
-    int toastScreenHeight = GetSystemMetrics(SM_CYSCREEN);
+    HMONITOR hMon = MonitorFromWindow(taskbarWnd ? taskbarWnd : NULL, MONITOR_DEFAULTTOPRIMARY);
+    UINT dpi = toast_get_monitor_dpi(hMon);
+    if (dpi == 0) dpi = 96;
 
-    int xPos = toastScreenWidth - toastWidth;  // stick to primary screen right edge
-    int yPos = taskbarRect.top - toastHeight;  // flush to taskbar top
+    int toastWidth = toast_scale(300, dpi);
+    int toastHeight = toast_scale(150, dpi);
 
-    // Fallback if taskbar position not found
-    if (yPos < 0) {
-        yPos = toastScreenHeight - toastHeight;
+    MONITORINFO mi = { sizeof(mi) };
+    int xPos = 0;
+    int yPos = 0;
+    if (GetMonitorInfoW(hMon, &mi)) {
+        xPos = mi.rcWork.right - toastWidth;
+        yPos = mi.rcWork.bottom - toastHeight;
+        if (xPos < mi.rcWork.left) xPos = mi.rcWork.left;
+        if (yPos < mi.rcWork.top) yPos = mi.rcWork.top;
+    } else {
+        int toastScreenWidth = GetSystemMetrics(SM_CXSCREEN);
+        int toastScreenHeight = GetSystemMetrics(SM_CYSCREEN);
+        xPos = toastScreenWidth - toastWidth;
+        yPos = (taskbarRect.top > 0) ? (taskbarRect.top - toastHeight) : (toastScreenHeight - toastHeight);
+        if (xPos < 0) xPos = 0;
+        if (yPos < 0) yPos = 0;
+        if (xPos + toastWidth > toastScreenWidth) xPos = toastScreenWidth - toastWidth;
+        if (yPos + toastHeight > toastScreenHeight) yPos = toastScreenHeight - toastHeight;
+        if (xPos < 0) xPos = 0;
+        if (yPos < 0) yPos = 0;
     }
-
-    // Keep toast within visible screen on small displays / unusual taskbar layouts.
-    if (xPos < 0) xPos = 0;
-    if (yPos < 0) yPos = 0;
-    if (xPos + toastWidth > toastScreenWidth) xPos = toastScreenWidth - toastWidth;
-    if (yPos + toastHeight > toastScreenHeight) yPos = toastScreenHeight - toastHeight;
-    if (xPos < 0) xPos = 0;
-    if (yPos < 0) yPos = 0;
 
     // Create toast window with message in window title (for debugging)
     // Store message pointer for use in WM_PAINT
@@ -2478,55 +2638,37 @@ void ShowCompletionNotification(HWND hwnd, int completed_mode) {
         // Store message in window user data for access in WM_PAINT
         SetWindowLongPtrW(g_hToastWnd, GWLP_USERDATA, (LONG_PTR)toastMessage);
 
-        // Create action button (centered at bottom)
-        int btnW = 200, btnH = 40;
-        int btnX = (toastWidth - btnW) / 2;
-        int btnY = toastHeight - btnH - 15;
         const wchar_t* btnText;
         if (is_pomodoro_mode((TimerMode)completed_mode)) {
             btnText = settings.default_break_is_long ? L"开始长休息" : L"开始短休息";
         } else if (completed_mode == TIMER_CUSTOM) {
-            btnText = L"继续自定义"
-            ;
+            btnText = L"继续自定义";
         } else {
             btnText = settings.default_pomodoro_is_long ? L"开始长番茄钟" : L"开始短番茄钟";
         }
+
         g_hToastButton = CreateWindowW(L"BUTTON", btnText,
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            btnX, btnY, btnW, btnH,
+            0, 0, 0, 0,
             g_hToastWnd, (HMENU)ID_TOAST_ACTION, GetModuleHandle(NULL), NULL);
 
-        // Set button font
-        static HFONT hBtnFont = NULL;
-        if (!hBtnFont) {
-            hBtnFont = CreateFontW(17, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                     DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-        }
-        SendMessage(g_hToastButton, WM_SETFONT, (WPARAM)hBtnFont, TRUE);
+        g_hToastCloseButton = CreateWindowW(L"BUTTON", L"✕",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_CENTER,
+            0, 0, 0, 0,
+            g_hToastWnd, (HMENU)ID_TOAST_CLOSE, GetModuleHandle(NULL), NULL);
 
-        // Explicitly set button text (force correct label)
+        g_hToastCollapseButton = CreateWindowW(L"BUTTON", L"_",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_CENTER,
+            0, 0, 0, 0,
+            g_hToastWnd, (HMENU)ID_TOAST_COLLAPSE, GetModuleHandle(NULL), NULL);
+
+        // Layout all children and apply DPI scaled font
+        toast_layout_children(g_hToastWnd, dpi);
         SetWindowTextW(g_hToastButton, btnText);
 
         // Force repaint to update dots and button
         InvalidateRect(g_hToastWnd, NULL, TRUE);
         UpdateWindow(g_hToastWnd);
-
-        // Create small close button in top-right corner
-        int closeW = 22, closeH = 22;
-        int closeX = toastWidth - closeW - 8;
-        int closeY = 8;
-        g_hToastCloseButton = CreateWindowW(L"BUTTON", L"✕",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_CENTER,
-            closeX, closeY, closeW, closeH,
-            g_hToastWnd, (HMENU)ID_TOAST_CLOSE, GetModuleHandle(NULL), NULL);
-        SendMessageW(g_hToastCloseButton, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
-
-        g_hToastCollapseButton = CreateWindowW(L"BUTTON", L"_",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_CENTER,
-            closeX - 26, closeY, 22, 22,
-            g_hToastWnd, (HMENU)ID_TOAST_COLLAPSE, GetModuleHandle(NULL), NULL);
-        SendMessageW(g_hToastCollapseButton, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
 
         // Show window and bring to foreground
         ShowWindow(g_hToastWnd, SW_SHOW);
