@@ -1073,8 +1073,9 @@ static void fs_update_local_preview(HWND dialog, int id, const wchar_t *text) {
     RECT bounds, format;
     HDC dc = GetDC(control);
     TEXTMETRICW metrics;
+    UINT dpi = app_get_window_dpi(dialog);
     HGDIOBJ previous = SelectObject(dc, (HFONT)SendMessageW(control, WM_GETFONT, 0, 0));
-    int padding = MulDiv(6, GetDeviceCaps(dc, LOGPIXELSY), 96), lines, content_height;
+    int padding = MulDiv(6, (int)dpi, 96), lines, content_height;
     GetTextMetricsW(dc, &metrics);
     SelectObject(dc, previous); ReleaseDC(control, dc);
     ShowScrollBar(control, SB_VERT, FALSE);
@@ -1168,14 +1169,12 @@ static int fs_read_scale_combo(HWND combo, const FullscreenScaleOption *options,
 
 static void fs_update_signature_preview_font(HWND dialog, FullscreenSignatureDraft *draft) {
     HWND control = GetDlgItem(dialog, IDC_FS_SIGNATURE_PREVIEW);
-    HDC dc = GetDC(control);
-    int dpi_y = GetDeviceCaps(dc, LOGPIXELSY);
+    UINT dpi = app_get_window_dpi(dialog);
     int points = MulDiv(17, draft->scale > 0 ? draft->scale : 100, 100);
-    ReleaseDC(control, dc);
     if (draft->preview_font) DeleteObject(draft->preview_font);
-    draft->preview_font = CreateFontW(-MulDiv(points, dpi_y, 72), 0, 0, 0, FW_NORMAL,
+    draft->preview_font = CreateFontW(-MulDiv(points, (int)dpi, 72), 0, 0, 0, FW_NORMAL,
         FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        ANTIALIASED_QUALITY, DEFAULT_PITCH, draft->font[0] ? draft->font : L"KaiTi");
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, draft->font[0] ? draft->font : L"KaiTi");
     SendMessageW(control, WM_SETFONT, (WPARAM)draft->preview_font, TRUE);
     GetDlgItemTextW(dialog, IDC_FS_SIGNATURE, draft->text, FS_SIGNATURE_CAPACITY);
     fs_update_local_preview(dialog, IDC_FS_SIGNATURE_PREVIEW, draft->text[0] ? draft->text : fs_signature_sample());
@@ -1242,12 +1241,25 @@ static INT_PTR CALLBACK FullscreenSignatureDlgProc(HWND dialog, UINT msg, WPARAM
             SetDlgItemTextW(dialog, IDC_FS_SIGNATURE_COLOR, color_text);
             fs_populate_font_combo(GetDlgItem(dialog, IDC_FS_SIGNATURE_FONT), fs_signature_fonts, FS_SIGNATURE_FONT_COUNT, draft->font);
             fs_populate_scale_combo(GetDlgItem(dialog, IDC_FS_SIGNATURE_SCALE), fs_scale_options, FS_SCALE_COUNT, draft->scale);
+            center_window_on_work_area(dialog);
             fs_update_signature_preview_font(dialog, draft);
             fs_signature_update(dialog, draft);
-            center_window_on_work_area(dialog);
             SetWindowPos(dialog, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
             SetFocus(GetDlgItem(dialog, IDC_FS_SIGNATURE));
             return FALSE;
+        }
+        case 0x02E0: /* WM_DPICHANGED */ {
+            RECT *prc = (RECT *)lParam;
+            if (prc) {
+                SetWindowPos(dialog, NULL, prc->left, prc->top,
+                    prc->right - prc->left, prc->bottom - prc->top,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            if (draft) {
+                fs_update_signature_preview_font(dialog, draft);
+                fs_signature_update(dialog, draft);
+            }
+            return TRUE;
         }
         case WM_CTLCOLORSTATIC:
             if ((HWND)lParam == GetDlgItem(dialog, IDC_FS_SIGNATURE_PREVIEW))
@@ -1407,14 +1419,12 @@ static const wchar_t *fs_mode_sample_time(int index) {
 
 static void fs_update_color_preview_font(HWND dialog, FullscreenColorDraft *draft) {
     HWND control = GetDlgItem(dialog, IDC_FS_PREVIEW_FIRST);
-    HDC dc = GetDC(control);
-    int dpi_y = GetDeviceCaps(dc, LOGPIXELSY);
+    UINT dpi = app_get_window_dpi(dialog);
     int points = MulDiv(31, draft->scale > 0 ? draft->scale : 100, 100);
-    ReleaseDC(control, dc);
     if (draft->preview_font) DeleteObject(draft->preview_font);
-    draft->preview_font = CreateFontW(-MulDiv(points, dpi_y, 72), 0, 0, 0, FW_NORMAL,
+    draft->preview_font = CreateFontW(-MulDiv(points, (int)dpi, 72), 0, 0, 0, FW_NORMAL,
         FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        ANTIALIASED_QUALITY, DEFAULT_PITCH, draft->font[0] ? draft->font : L"Segoe UI");
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, draft->font[0] ? draft->font : L"Segoe UI");
     SendMessageW(control, WM_SETFONT, (WPARAM)draft->preview_font, TRUE);
     fs_update_local_preview(dialog, IDC_FS_PREVIEW_FIRST, fs_mode_sample_time(draft->index));
     InvalidateRect(control, NULL, TRUE);
@@ -1444,16 +1454,28 @@ static INT_PTR CALLBACK FullscreenColorsDlgProc(HWND dialog, UINT msg, WPARAM wP
             SetWindowTextW(dialog, title);
             fs_populate_font_combo(GetDlgItem(dialog, IDC_FS_FONT_FIRST), fs_mode_fonts, FS_MODE_FONT_COUNT, draft->font);
             fs_populate_scale_combo(GetDlgItem(dialog, IDC_FS_SCALE_FIRST), fs_scale_options, FS_SCALE_COUNT, draft->scale);
-            fs_update_color_preview_font(dialog, draft);
             SendDlgItemMessageW(dialog, IDC_FS_EDIT_FIRST, EM_SETLIMITTEXT, 7, 0);
             swprintf(text, 8, L"#%06X", draft->color);
             SetDlgItemTextW(dialog, IDC_FS_EDIT_FIRST, text);
             fs_validate_color(dialog, draft);
             center_window_on_work_area(dialog);
+            fs_update_color_preview_font(dialog, draft);
             SetWindowPos(dialog, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
             SetFocus(GetDlgItem(dialog, IDC_FS_EDIT_FIRST));
             SendDlgItemMessageW(dialog, IDC_FS_EDIT_FIRST, EM_SETSEL, 0, -1);
             return FALSE;
+        }
+        case 0x02E0: /* WM_DPICHANGED */ {
+            RECT *prc = (RECT *)lParam;
+            if (prc) {
+                SetWindowPos(dialog, NULL, prc->left, prc->top,
+                    prc->right - prc->left, prc->bottom - prc->top,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            if (draft) {
+                fs_update_color_preview_font(dialog, draft);
+            }
+            return TRUE;
         }
         case WM_CTLCOLORSTATIC:
             if (draft && (HWND)lParam == GetDlgItem(dialog, IDC_FS_PREVIEW_FIRST))

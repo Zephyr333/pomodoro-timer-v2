@@ -490,7 +490,93 @@ static TimerMode get_default_pomodoro_mode(void);
 static TimerMode get_default_break_mode(void);
 
 static void close_toast_notification_if_open(void);
-static void center_window_on_work_area(HWND hwnd);
+
+static UINT app_get_monitor_dpi(HMONITOR hMon) {
+    typedef HRESULT (WINAPI *GetDpiForMonitorFn)(HMONITOR, int, UINT*, UINT*);
+    static GetDpiForMonitorFn pfnGetDpiForMonitor = NULL;
+    static BOOL resolved = FALSE;
+    if (!resolved) {
+        HMODULE hShcore = LoadLibraryW(L"Shcore.dll");
+        if (hShcore) {
+            pfnGetDpiForMonitor = (GetDpiForMonitorFn)(void*)GetProcAddress(hShcore, "GetDpiForMonitor");
+        }
+        resolved = TRUE;
+    }
+    if (pfnGetDpiForMonitor && hMon) {
+        UINT dx = 0, dy = 0;
+        if (SUCCEEDED(pfnGetDpiForMonitor(hMon, 0 /* MDT_EFFECTIVE_DPI */, &dx, &dy)) && dx > 0) {
+            return dx;
+        }
+    }
+    return 96;
+}
+
+static UINT app_get_window_dpi(HWND hwnd) {
+    typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
+    static GetDpiForWindowFn pfnGetDpiForWindow = NULL;
+    static BOOL resolved = FALSE;
+    if (!resolved) {
+        pfnGetDpiForWindow = (GetDpiForWindowFn)(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+        resolved = TRUE;
+    }
+    if (hwnd && pfnGetDpiForWindow) {
+        UINT dpi = pfnGetDpiForWindow(hwnd);
+        if (dpi > 0) return dpi;
+    }
+    HMONITOR hMon = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+                         : MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    UINT dpi = app_get_monitor_dpi(hMon);
+    if (dpi > 0) return dpi;
+    return 96;
+}
+
+static inline int app_scale(int val, UINT dpi) {
+    return MulDiv(val, (int)(dpi ? dpi : 96), 96);
+}
+
+static void center_window_on_work_area(HWND hwnd) {
+    RECT rect;
+    RECT workArea;
+    int width;
+    int height;
+    int x;
+    int y;
+    POINT ptCursor = {0, 0};
+    HMONITOR hMon = NULL;
+    MONITORINFO mi = { sizeof(mi) };
+
+    if (!hwnd) return;
+    GetWindowRect(hwnd, &rect);
+    width = rect.right - rect.left;
+    height = rect.bottom - rect.top;
+
+    if (GetCursorPos(&ptCursor)) {
+        hMon = MonitorFromPoint(ptCursor, MONITOR_DEFAULTTONEAREST);
+    }
+    if (!hMon) {
+        HWND hParent = GetParent(hwnd);
+        if (hParent) {
+            hMon = MonitorFromWindow(hParent, MONITOR_DEFAULTTONEAREST);
+        }
+    }
+
+    if (hMon && GetMonitorInfoW(hMon, &mi)) {
+        workArea = mi.rcWork;
+    } else if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
+        workArea.left = 0;
+        workArea.top = 0;
+        workArea.right = GetSystemMetrics(SM_CXSCREEN);
+        workArea.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+
+    x = workArea.left + ((workArea.right - workArea.left) - width) / 2;
+    y = workArea.top + ((workArea.bottom - workArea.top) - height) / 2;
+    if (x < workArea.left) x = workArea.left;
+    if (y < workArea.top) y = workArea.top;
+
+    SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+}
+
 #include "fullscreen.h"
 #include "tray_drag.h"
 
@@ -1207,92 +1293,6 @@ static void reset_defaults_keep_data(void) {
 void init_system_metrics() {
     screenWidth = GetSystemMetrics(SM_CXSCREEN);
     screenHeight = GetSystemMetrics(SM_CYSCREEN);
-}
-
-static UINT app_get_monitor_dpi(HMONITOR hMon) {
-    typedef HRESULT (WINAPI *GetDpiForMonitorFn)(HMONITOR, int, UINT*, UINT*);
-    static GetDpiForMonitorFn pfnGetDpiForMonitor = NULL;
-    static BOOL resolved = FALSE;
-    if (!resolved) {
-        HMODULE hShcore = LoadLibraryW(L"Shcore.dll");
-        if (hShcore) {
-            pfnGetDpiForMonitor = (GetDpiForMonitorFn)(void*)GetProcAddress(hShcore, "GetDpiForMonitor");
-        }
-        resolved = TRUE;
-    }
-    if (pfnGetDpiForMonitor && hMon) {
-        UINT dx = 0, dy = 0;
-        if (SUCCEEDED(pfnGetDpiForMonitor(hMon, 0 /* MDT_EFFECTIVE_DPI */, &dx, &dy)) && dx > 0) {
-            return dx;
-        }
-    }
-    return 96;
-}
-
-static UINT app_get_window_dpi(HWND hwnd) {
-    typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
-    static GetDpiForWindowFn pfnGetDpiForWindow = NULL;
-    static BOOL resolved = FALSE;
-    if (!resolved) {
-        pfnGetDpiForWindow = (GetDpiForWindowFn)(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
-        resolved = TRUE;
-    }
-    if (hwnd && pfnGetDpiForWindow) {
-        UINT dpi = pfnGetDpiForWindow(hwnd);
-        if (dpi > 0) return dpi;
-    }
-    HMONITOR hMon = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
-                         : MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY);
-    UINT dpi = app_get_monitor_dpi(hMon);
-    if (dpi > 0) return dpi;
-    return 96;
-}
-
-static inline int app_scale(int val, UINT dpi) {
-    return MulDiv(val, (int)(dpi ? dpi : 96), 96);
-}
-
-static void center_window_on_work_area(HWND hwnd) {
-    RECT rect;
-    RECT workArea;
-    int width;
-    int height;
-    int x;
-    int y;
-    POINT ptCursor = {0, 0};
-    HMONITOR hMon = NULL;
-    MONITORINFO mi = { sizeof(mi) };
-
-    if (!hwnd) return;
-    GetWindowRect(hwnd, &rect);
-    width = rect.right - rect.left;
-    height = rect.bottom - rect.top;
-
-    if (GetCursorPos(&ptCursor)) {
-        hMon = MonitorFromPoint(ptCursor, MONITOR_DEFAULTTONEAREST);
-    }
-    if (!hMon) {
-        HWND hParent = GetParent(hwnd);
-        if (hParent) {
-            hMon = MonitorFromWindow(hParent, MONITOR_DEFAULTTONEAREST);
-        }
-    }
-
-    if (hMon && GetMonitorInfoW(hMon, &mi)) {
-        workArea = mi.rcWork;
-    } else if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
-        workArea.left = 0;
-        workArea.top = 0;
-        workArea.right = GetSystemMetrics(SM_CXSCREEN);
-        workArea.bottom = GetSystemMetrics(SM_CYSCREEN);
-    }
-
-    x = workArea.left + ((workArea.right - workArea.left) - width) / 2;
-    y = workArea.top + ((workArea.bottom - workArea.top) - height) / 2;
-    if (x < workArea.left) x = workArea.left;
-    if (y < workArea.top) y = workArea.top;
-
-    SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
 }
 
 static const wchar_t* g_input_title = L"输入";
