@@ -2175,6 +2175,18 @@ void ShowAboutDialog(HWND hwndParent) {
     }
 }
 
+static void about_update_link_fonts(HWND hwndDlg, HFONT *phLinkFont) {
+    HFONT hFont = (HFONT)SendDlgItemMessageW(hwndDlg, IDC_WEBSITE, WM_GETFONT, 0, 0);
+    LOGFONTW lf;
+    if (hFont && GetObjectW(hFont, sizeof(LOGFONTW), &lf)) {
+        lf.lfUnderline = TRUE;
+        if (*phLinkFont) DeleteObject(*phLinkFont);
+        *phLinkFont = CreateFontIndirectW(&lf);
+        SendDlgItemMessageW(hwndDlg, IDC_WEBSITE, WM_SETFONT, (WPARAM)*phLinkFont, TRUE);
+        SendDlgItemMessageW(hwndDlg, IDC_COFFEE, WM_SETFONT, (WPARAM)*phLinkFont, TRUE);
+    }
+}
+
 // About dialog procedure
 INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     static HFONT hLinkFont = NULL;
@@ -2189,19 +2201,25 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
             SetDlgItemTextW(hwndDlg, IDC_COFFEE, L"支持作者（请喝咖啡）");
 
-            // Create underlined font for link
-            HFONT hFont = (HFONT)SendDlgItemMessageW(hwndDlg, IDC_WEBSITE, WM_GETFONT, 0, 0);
-            LOGFONTW lf;
-            GetObjectW(hFont, sizeof(LOGFONTW), &lf);
-            lf.lfUnderline = TRUE;
-            hLinkFont = CreateFontIndirectW(&lf);
-            SendDlgItemMessageW(hwndDlg, IDC_WEBSITE, WM_SETFONT, (WPARAM)hLinkFont, TRUE);
-            SendDlgItemMessageW(hwndDlg, IDC_COFFEE, WM_SETFONT, (WPARAM)hLinkFont, TRUE);
+            center_window_on_work_area(hwndDlg);
+
+            // Create underlined font for link after positioning to target monitor
+            about_update_link_fonts(hwndDlg, &hLinkFont);
 
             // Create brush for WM_CTLCOLORSTATIC
+            if (hBrush) DeleteObject(hBrush);
             hBrush = CreateSolidBrush(GetSysColor(COLOR_WINDOW));
 
-            center_window_on_work_area(hwndDlg);
+            return TRUE;
+        }
+        case 0x02E0: /* WM_DPICHANGED */ {
+            RECT *prc = (RECT *)lParam;
+            if (prc) {
+                SetWindowPos(hwndDlg, NULL, prc->left, prc->top,
+                    prc->right - prc->left, prc->bottom - prc->top,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            about_update_link_fonts(hwndDlg, &hLinkFont);
             return TRUE;
         }
         case WM_CTLCOLORSTATIC: {

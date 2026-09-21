@@ -1057,17 +1057,6 @@ static int fs_signature_valid(const wchar_t *text) {
     }
     return lines <= 6;
 }
-/* The small preview is a readable sample, not a scaled-down entire screen. */
-static HFONT fs_init_local_preview(HWND dialog, int id, int points, int digits) {
-    HWND control = GetDlgItem(dialog, id);
-    HDC dc = GetDC(control);
-    HFONT font = CreateFontW(-MulDiv(points, GetDeviceCaps(dc, LOGPIXELSY), 72), 0, 0, 0,
-        FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        ANTIALIASED_QUALITY, digits ? FIXED_PITCH : DEFAULT_PITCH, digits ? L"Consolas" : L"Microsoft YaHei UI");
-    ReleaseDC(control, dc);
-    SendMessageW(control, WM_SETFONT, (WPARAM)font, TRUE);
-    return font;
-}
 static void fs_update_local_preview(HWND dialog, int id, const wchar_t *text) {
     HWND control = GetDlgItem(dialog, id);
     RECT bounds, format;
