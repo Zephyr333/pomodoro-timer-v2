@@ -146,6 +146,7 @@ static volatile LONG fs_session;
 static HWND fs_previous_foreground;
 static FullscreenView fs_view;
 static int fs_hud_visible;
+static int fs_in_menu_loop;
 static POINT fs_last_cursor;
 
 #ifndef EVENT_SYSTEM_FOREGROUND
@@ -679,6 +680,10 @@ static LRESULT CALLBACK FullscreenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             return 0;
         case WM_ERASEBKGND: return 1;
         case WM_SETCURSOR:
+            if (fs_in_menu_loop) {
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return TRUE;
+            }
             if (fs_hud_visible && (settings.fullscreen_show_mouse_tips || fs_preview_active)) {
                 SetCursor(LoadCursor(NULL, IDC_ARROW));
                 return TRUE;
@@ -694,6 +699,7 @@ static LRESULT CALLBACK FullscreenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 if (settings.fullscreen_show_mouse_tips || fs_preview_active) {
                     if (!fs_hud_visible) {
                         fs_hud_visible = 1;
+                        SetCursor(LoadCursor(NULL, IDC_ARROW));
                         for (i = 0; i < fs_count; ++i) InvalidateRect(fs_windows[i], NULL, FALSE);
                     }
                     if (fs_count > 0) SetTimer(fs_windows[0], ID_FS_HUD_TIMER, 1500, NULL);
@@ -704,9 +710,22 @@ static LRESULT CALLBACK FullscreenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         case WM_TIMER:
             if (wParam == ID_FS_HUD_TIMER) {
                 size_t i;
+                POINT pt;
+                int over_fs = 0;
                 KillTimer(hwnd, ID_FS_HUD_TIMER);
                 fs_hud_visible = 0;
-                SetCursor(NULL);
+                if (!fs_in_menu_loop) {
+                    GetCursorPos(&pt);
+                    for (i = 0; i < fs_count; ++i) {
+                        if (fs_windows[i] && WindowFromPoint(pt) == fs_windows[i]) {
+                            over_fs = 1;
+                            break;
+                        }
+                    }
+                    if (over_fs) {
+                        SetCursor(NULL);
+                    }
+                }
                 for (i = 0; i < fs_count; ++i) InvalidateRect(fs_windows[i], NULL, FALSE);
                 return 0;
             }

@@ -724,6 +724,13 @@ int wmain(int argc, wchar_t **argv) {
         SendMessageW(fs_windows[0], WM_RBUTTONUP, 0, 0);
         CHECK(fs_active && !is_running, "rapid click 4 stops timer again");
 
+        /* Test cursor protection when entering menu loop while fullscreen is active */
+        SendMessageW(g_main_hwnd, WM_ENTERMENULOOP, 0, 0);
+        CHECK(fs_in_menu_loop, "menu loop flag set on WM_ENTERMENULOOP");
+        SendMessageW(fs_windows[0], WM_TIMER, ID_FS_HUD_TIMER, 0);
+        SendMessageW(g_main_hwnd, WM_EXITMENULOOP, 0, 0);
+        CHECK(!fs_in_menu_loop, "menu loop flag cleared on WM_EXITMENULOOP");
+
         SendMessageW(fs_windows[0], WM_KEYDOWN, VK_ESCAPE, 0); pump(50);
     }
     CHECK(!fs_active, "escape exits fullscreen after right click test");

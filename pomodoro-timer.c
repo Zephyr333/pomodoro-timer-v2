@@ -2125,7 +2125,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.23");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.24");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -3217,6 +3217,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 POINT pt;
                 GetCursorPos(&pt);
                 SetForegroundWindow(hwnd);
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
                 int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, NULL);
 
                 // Handle menu commands
@@ -3664,6 +3665,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case WM_TRAY_DRAG_INPUT:
             td_input((DWORD)wParam);
+            return 0;
+        case WM_ENTERMENULOOP:
+            fs_in_menu_loop = 1;
+            if (fs_count > 0 && fs_windows && fs_windows[0]) {
+                KillTimer(fs_windows[0], ID_FS_HUD_TIMER);
+            }
+            SetCursor(LoadCursor(NULL, IDC_ARROW));
+            return 0;
+        case WM_EXITMENULOOP:
+            fs_in_menu_loop = 0;
             return 0;
         case WM_TIMER:
             if (wParam == ID_FS_REFRESH) { fs_refresh(); return 0; }
