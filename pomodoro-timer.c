@@ -1209,6 +1209,49 @@ void init_system_metrics() {
     screenHeight = GetSystemMetrics(SM_CYSCREEN);
 }
 
+static UINT app_get_monitor_dpi(HMONITOR hMon) {
+    typedef HRESULT (WINAPI *GetDpiForMonitorFn)(HMONITOR, int, UINT*, UINT*);
+    static GetDpiForMonitorFn pfnGetDpiForMonitor = NULL;
+    static BOOL resolved = FALSE;
+    if (!resolved) {
+        HMODULE hShcore = LoadLibraryW(L"Shcore.dll");
+        if (hShcore) {
+            pfnGetDpiForMonitor = (GetDpiForMonitorFn)(void*)GetProcAddress(hShcore, "GetDpiForMonitor");
+        }
+        resolved = TRUE;
+    }
+    if (pfnGetDpiForMonitor && hMon) {
+        UINT dx = 0, dy = 0;
+        if (SUCCEEDED(pfnGetDpiForMonitor(hMon, 0 /* MDT_EFFECTIVE_DPI */, &dx, &dy)) && dx > 0) {
+            return dx;
+        }
+    }
+    return 96;
+}
+
+static UINT app_get_window_dpi(HWND hwnd) {
+    typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
+    static GetDpiForWindowFn pfnGetDpiForWindow = NULL;
+    static BOOL resolved = FALSE;
+    if (!resolved) {
+        pfnGetDpiForWindow = (GetDpiForWindowFn)(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+        resolved = TRUE;
+    }
+    if (hwnd && pfnGetDpiForWindow) {
+        UINT dpi = pfnGetDpiForWindow(hwnd);
+        if (dpi > 0) return dpi;
+    }
+    HMONITOR hMon = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+                         : MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    UINT dpi = app_get_monitor_dpi(hMon);
+    if (dpi > 0) return dpi;
+    return 96;
+}
+
+static inline int app_scale(int val, UINT dpi) {
+    return MulDiv(val, (int)(dpi ? dpi : 96), 96);
+}
+
 static void center_window_on_work_area(HWND hwnd) {
     RECT rect;
     RECT workArea;
@@ -1216,13 +1259,28 @@ static void center_window_on_work_area(HWND hwnd) {
     int height;
     int x;
     int y;
+    POINT ptCursor = {0, 0};
+    HMONITOR hMon = NULL;
+    MONITORINFO mi = { sizeof(mi) };
 
     if (!hwnd) return;
     GetWindowRect(hwnd, &rect);
     width = rect.right - rect.left;
     height = rect.bottom - rect.top;
 
-    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
+    if (GetCursorPos(&ptCursor)) {
+        hMon = MonitorFromPoint(ptCursor, MONITOR_DEFAULTTONEAREST);
+    }
+    if (!hMon) {
+        HWND hParent = GetParent(hwnd);
+        if (hParent) {
+            hMon = MonitorFromWindow(hParent, MONITOR_DEFAULTTONEAREST);
+        }
+    }
+
+    if (hMon && GetMonitorInfoW(hMon, &mi)) {
+        workArea = mi.rcWork;
+    } else if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
         workArea.left = 0;
         workArea.top = 0;
         workArea.right = GetSystemMetrics(SM_CXSCREEN);
@@ -2201,48 +2259,9 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
 static HFONT g_hToastBtnFont = NULL;
 static HFONT g_hToastSmallBtnFont = NULL;
 
-static UINT toast_get_monitor_dpi(HMONITOR hMon) {
-    typedef HRESULT (WINAPI *GetDpiForMonitorFn)(HMONITOR, int, UINT*, UINT*);
-    static GetDpiForMonitorFn pfnGetDpiForMonitor = NULL;
-    static BOOL resolved = FALSE;
-    if (!resolved) {
-        HMODULE hShcore = LoadLibraryW(L"Shcore.dll");
-        if (hShcore) {
-            pfnGetDpiForMonitor = (GetDpiForMonitorFn)(void*)GetProcAddress(hShcore, "GetDpiForMonitor");
-        }
-        resolved = TRUE;
-    }
-    if (pfnGetDpiForMonitor && hMon) {
-        UINT dx = 0, dy = 0;
-        if (SUCCEEDED(pfnGetDpiForMonitor(hMon, 0 /* MDT_EFFECTIVE_DPI */, &dx, &dy)) && dx > 0) {
-            return dx;
-        }
-    }
-    return 96;
-}
-
-static UINT toast_get_dpi(HWND hwnd) {
-    typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
-    static GetDpiForWindowFn pfnGetDpiForWindow = NULL;
-    static BOOL resolved = FALSE;
-    if (!resolved) {
-        pfnGetDpiForWindow = (GetDpiForWindowFn)(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
-        resolved = TRUE;
-    }
-    if (hwnd && pfnGetDpiForWindow) {
-        UINT dpi = pfnGetDpiForWindow(hwnd);
-        if (dpi > 0) return dpi;
-    }
-    HMONITOR hMon = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
-                         : MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY);
-    UINT dpi = toast_get_monitor_dpi(hMon);
-    if (dpi > 0) return dpi;
-    return 96;
-}
-
-static inline int toast_scale(int val, UINT dpi) {
-    return MulDiv(val, (int)(dpi ? dpi : 96), 96);
-}
+#define toast_get_monitor_dpi app_get_monitor_dpi
+#define toast_get_dpi app_get_window_dpi
+#define toast_scale app_scale
 
 static void toast_layout_children(HWND hwnd, UINT dpi) {
     RECT rect;
@@ -2253,22 +2272,22 @@ static void toast_layout_children(HWND hwnd, UINT dpi) {
     int closeSize = toast_scale(22, dpi);
     int margin = toast_scale(8, dpi);
     int gap = toast_scale(4, dpi);
-    int smallFontSize = -toast_scale(15, dpi);
-    int btnFontSize = -toast_scale(17, dpi);
+    int smallFontSize = toast_scale(12, dpi);
+    int btnFontSize = toast_scale(17, dpi);
 
     if (g_hToastSmallBtnFont) {
         DeleteObject(g_hToastSmallBtnFont);
         g_hToastSmallBtnFont = NULL;
     }
-    g_hToastSmallBtnFont = CreateFontW(smallFontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    g_hToastSmallBtnFont = CreateFontW(smallFontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
     if (g_hToastBtnFont) {
         DeleteObject(g_hToastBtnFont);
         g_hToastBtnFont = NULL;
     }
     g_hToastBtnFont = CreateFontW(btnFontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei");
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
     if (g_toast_collapsed) {
         if (g_hToastButton) ShowWindow(g_hToastButton, SW_HIDE);
@@ -2469,10 +2488,10 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (g_toast_collapsed) {
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, RGB(255, 255, 255));
-                int collapsedFontSize = -toast_scale(16, dpi);
+                int collapsedFontSize = toast_scale(13, dpi);
                 HFONT hFont = CreateFontW(collapsedFontSize, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                         DEFAULT_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei");
+                                         CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
                 HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
                 DrawTextW(hdc, L"提醒", -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 SelectObject(hdc, hOldFont);
@@ -2510,10 +2529,10 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 // Draw message text in white
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, RGB(255, 255, 255));
-                int titleFontSize = -toast_scale(20, dpi);
+                int titleFontSize = toast_scale(20, dpi);
                 HFONT hFont = CreateFontW(titleFontSize, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                         DEFAULT_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei");
+                                         CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
                 HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
 
                 int pad = toast_scale(15, dpi);
@@ -2959,16 +2978,60 @@ static void load_heatmap_data(void) {
     g_heatmap_weekTotal = clamp_int(g_heatmap_weekTotal, 0, 999999);
 }
 
+static HWND g_hHeatmapPrevBtn = NULL;
+static HWND g_hHeatmapTodayBtn = NULL;
+static HWND g_hHeatmapNextBtn = NULL;
+static HFONT g_hHeatmapBtnFont = NULL;
+
+static void heatmap_layout_children(HWND hwnd, UINT dpi) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    int clientW = rc.right - rc.left;
+    if (clientW <= 0) clientW = app_scale(374, dpi);
+
+    int btnH = app_scale(24, dpi);
+    int navBtnW = app_scale(30, dpi);
+    int todayBtnW = app_scale(60, dpi);
+    int topY = app_scale(10, dpi);
+    int sideMargin = app_scale(18, dpi);
+
+    int btnFontSize = app_scale(14, dpi);
+    if (g_hHeatmapBtnFont) {
+        DeleteObject(g_hHeatmapBtnFont);
+        g_hHeatmapBtnFont = NULL;
+    }
+    g_hHeatmapBtnFont = CreateFontW(btnFontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+
+    if (g_hHeatmapPrevBtn) {
+        SetWindowPos(g_hHeatmapPrevBtn, NULL, sideMargin, topY, navBtnW, btnH, SWP_NOZORDER | SWP_SHOWWINDOW);
+        SendMessageW(g_hHeatmapPrevBtn, WM_SETFONT, (WPARAM)g_hHeatmapBtnFont, TRUE);
+    }
+    if (g_hHeatmapTodayBtn) {
+        int todayX = (clientW - todayBtnW) / 2;
+        SetWindowPos(g_hHeatmapTodayBtn, NULL, todayX, topY, todayBtnW, btnH, SWP_NOZORDER | SWP_SHOWWINDOW);
+        SendMessageW(g_hHeatmapTodayBtn, WM_SETFONT, (WPARAM)g_hHeatmapBtnFont, TRUE);
+    }
+    if (g_hHeatmapNextBtn) {
+        int nextX = clientW - sideMargin - navBtnW;
+        SetWindowPos(g_hHeatmapNextBtn, NULL, nextX, topY, navBtnW, btnH, SWP_NOZORDER | SWP_SHOWWINDOW);
+        SendMessageW(g_hHeatmapNextBtn, WM_SETFONT, (WPARAM)g_hHeatmapBtnFont, TRUE);
+    }
+}
+
 LRESULT CALLBACK HeatmapWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
-        case WM_CREATE:
-            CreateWindowW(L"BUTTON", L"<", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                18, 10, 30, 24, hwnd, (HMENU)ID_HEATMAP_PREV, GetModuleHandle(NULL), NULL);
-            CreateWindowW(L"BUTTON", L"本月", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                160, 10, 60, 24, hwnd, (HMENU)ID_HEATMAP_TODAY, GetModuleHandle(NULL), NULL);
-            CreateWindowW(L"BUTTON", L">", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                336, 10, 30, 24, hwnd, (HMENU)ID_HEATMAP_NEXT, GetModuleHandle(NULL), NULL);
+        case WM_CREATE: {
+            UINT dpi = app_get_window_dpi(hwnd);
+            g_hHeatmapPrevBtn = CreateWindowW(L"BUTTON", L"<", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                0, 0, 0, 0, hwnd, (HMENU)ID_HEATMAP_PREV, GetModuleHandle(NULL), NULL);
+            g_hHeatmapTodayBtn = CreateWindowW(L"BUTTON", L"本月", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                0, 0, 0, 0, hwnd, (HMENU)ID_HEATMAP_TODAY, GetModuleHandle(NULL), NULL);
+            g_hHeatmapNextBtn = CreateWindowW(L"BUTTON", L">", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                0, 0, 0, 0, hwnd, (HMENU)ID_HEATMAP_NEXT, GetModuleHandle(NULL), NULL);
+            heatmap_layout_children(hwnd, dpi);
             return 0;
+        }
         case WM_COMMAND:
             if (LOWORD(wParam) == ID_HEATMAP_PREV) {
                 g_heatmap_display_month--;
@@ -3024,6 +3087,18 @@ LRESULT CALLBACK HeatmapWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             break;
         }
+        case 0x02E0: /* WM_DPICHANGED */ {
+            UINT newDpi = LOWORD(wParam);
+            RECT* prc = (RECT*)lParam;
+            if (prc) {
+                SetWindowPos(hwnd, NULL, prc->left, prc->top,
+                    prc->right - prc->left, prc->bottom - prc->top,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            heatmap_layout_children(hwnd, newDpi);
+            InvalidateRect(hwnd, NULL, TRUE);
+            return 0;
+        }
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
@@ -3037,19 +3112,23 @@ LRESULT CALLBACK HeatmapWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             time_t now = time(NULL);
             struct tm* tmNow = localtime(&now);
             const wchar_t* weekNames[7] = {L"一", L"二", L"三", L"四", L"五", L"六", L"日"};
-            int originX = 20;
-            int originY = 126;
-            int cellW = 48;
-            int cellH = 34;
+            UINT dpi = app_get_window_dpi(hwnd);
+            int originX = app_scale(20, dpi);
+            int originY = app_scale(126, dpi);
+            int cellW = app_scale(48, dpi);
+            int cellH = app_scale(34, dpi);
 
             // Keep the calendar live even if sessions complete while window remains open.
             load_heatmap_data();
 
-            HFONT hTitle = CreateFontW(20, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+            int titleSize = app_scale(20, dpi);
+            int bodySize = app_scale(15, dpi);
+
+            HFONT hTitle = CreateFontW(titleSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH, L"Microsoft YaHei UI");
-            HFONT hBody = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+            HFONT hBody = CreateFontW(bodySize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH, L"Microsoft YaHei UI");
             HFONT hOld = (HFONT)SelectObject(hdc, hBody);
 
@@ -3058,7 +3137,8 @@ LRESULT CALLBACK HeatmapWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SetBkMode(hdc, TRANSPARENT);
 
             SelectObject(hdc, hTitle);
-            TextOutW(hdc, 110, 42, L"番茄钟月历热力图", 8);
+            RECT titleRc = {0, app_scale(42, dpi), rect.right, app_scale(42 + 28, dpi)};
+            DrawTextW(hdc, L"番茄钟月历热力图", -1, &titleRc, DT_CENTER | DT_SINGLELINE);
 
             SelectObject(hdc, hBody);
             {
@@ -3067,11 +3147,13 @@ LRESULT CALLBACK HeatmapWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 selectedYearTotal = get_year_total(g_heatmap_display_year);
                 swprintf(summary, 256, L"%04d年%02d月   当月: %d   该年: %d   总计: %d",
                     g_heatmap_display_year, g_heatmap_display_month, monthTotal, selectedYearTotal, g_heatmap_total);
-                TextOutW(hdc, 20, 76, summary, lstrlenW(summary));
+                TextOutW(hdc, originX, app_scale(76, dpi), summary, lstrlenW(summary));
             }
 
+            int weekTextOffsetX = (cellW - app_scale(14, dpi)) / 2;
+            int weekTextY = originY - app_scale(24, dpi);
             for (i = 0; i < 7; ++i) {
-                TextOutW(hdc, originX + i * cellW + 18, originY - 24, weekNames[i], 1);
+                TextOutW(hdc, originX + i * cellW + weekTextOffsetX, weekTextY, weekNames[i], 1);
             }
 
             firstWeekday = get_weekday_monday0(g_heatmap_display_year, g_heatmap_display_month, 1);
@@ -3085,6 +3167,9 @@ LRESULT CALLBACK HeatmapWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_heatmap_day_rect_valid[i] = 0;
             }
 
+            int cellGap = app_scale(4, dpi);
+            if (cellGap < 2) cellGap = 2;
+
             for (day = 1; day <= days; ++day) {
                 int slot = firstWeekday + day - 1;
                 int row = slot / 7;
@@ -3094,7 +3179,7 @@ LRESULT CALLBACK HeatmapWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 int c = get_day_count_value(g_heatmap_display_year, g_heatmap_display_month, day);
                 COLORREF color = RGB(235, 237, 240);
                 HBRUSH brush;
-                RECT r = {x, y, x + cellW - 4, y + cellH - 4};
+                RECT r = {x, y, x + cellW - cellGap, y + cellH - cellGap};
                 wchar_t dayText[16];
                 BOOL isToday = FALSE;
 
@@ -3117,7 +3202,9 @@ LRESULT CALLBACK HeatmapWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_heatmap_day_rect_valid[day] = 1;
 
                 if (isToday || day == g_heatmap_selected_day) {
-                    HPEN pen = CreatePen(PS_SOLID, 2, day == g_heatmap_selected_day ? RGB(220, 20, 60) : RGB(30, 144, 255));
+                    int penWidth = app_scale(2, dpi);
+                    if (penWidth < 1) penWidth = 1;
+                    HPEN pen = CreatePen(PS_SOLID, penWidth, day == g_heatmap_selected_day ? RGB(220, 20, 60) : RGB(30, 144, 255));
                     HPEN oldPen = (HPEN)SelectObject(hdc, pen);
                     HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
                     Rectangle(hdc, r.left, r.top, r.right, r.bottom);
@@ -3127,15 +3214,15 @@ LRESULT CALLBACK HeatmapWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
 
                 swprintf(dayText, 16, L"%d", day);
-                TextOutW(hdc, x + 4, y + 2, dayText, lstrlenW(dayText));
+                TextOutW(hdc, x + app_scale(4, dpi), y + app_scale(2, dpi), dayText, lstrlenW(dayText));
                 if (c > 0) {
                     swprintf(dayText, 16, L"%d", c);
-                    TextOutW(hdc, x + cellW - 20, y + cellH - 18, dayText, lstrlenW(dayText));
+                    TextOutW(hdc, x + cellW - app_scale(20, dpi), y + cellH - app_scale(18, dpi), dayText, lstrlenW(dayText));
                 }
             }
 
-            TextOutW(hdc, 20, 350, L"颜色越深，完成数量越多（16次及以上按最深色）。", 24);
-            TextOutW(hdc, 20, 372, g_heatmap_info_text, lstrlenW(g_heatmap_info_text));
+            TextOutW(hdc, originX, app_scale(350, dpi), L"颜色越深，完成数量越多（16次及以上按最深色）。", 24);
+            TextOutW(hdc, originX, app_scale(372, dpi), g_heatmap_info_text, lstrlenW(g_heatmap_info_text));
 
             SelectObject(hdc, hOld);
             DeleteObject(hTitle);
@@ -3147,6 +3234,13 @@ LRESULT CALLBACK HeatmapWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
+            if (g_hHeatmapBtnFont) {
+                DeleteObject(g_hHeatmapBtnFont);
+                g_hHeatmapBtnFont = NULL;
+            }
+            g_hHeatmapPrevBtn = NULL;
+            g_hHeatmapTodayBtn = NULL;
+            g_hHeatmapNextBtn = NULL;
             g_hHeatmapWnd = NULL;
             return 0;
     }
@@ -3170,8 +3264,12 @@ void RegisterHeatmapWindowClass(void) {
 void ShowHeatmapWindow(HWND hwnd) {
     (void)hwnd;
     RECT workArea = {0};
-    int heatmapWidth = 390;
-    int heatmapHeight = 430;
+    POINT ptCursor = {0, 0};
+    HMONITOR hMon = NULL;
+    MONITORINFO mi = { sizeof(mi) };
+    UINT dpi = 96;
+    int heatmapWidth;
+    int heatmapHeight;
     int xPos;
     int yPos;
 
@@ -3185,12 +3283,23 @@ void ShowHeatmapWindow(HWND hwnd) {
         return;
     }
 
-    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
+    if (GetCursorPos(&ptCursor)) {
+        hMon = MonitorFromPoint(ptCursor, MONITOR_DEFAULTTONEAREST);
+    }
+    if (hMon && GetMonitorInfoW(hMon, &mi)) {
+        workArea = mi.rcWork;
+        dpi = app_get_monitor_dpi(hMon);
+    } else if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
         workArea.left = 0;
         workArea.top = 0;
         workArea.right = GetSystemMetrics(SM_CXSCREEN);
         workArea.bottom = GetSystemMetrics(SM_CYSCREEN);
+        dpi = 96;
     }
+
+    heatmapWidth = app_scale(390, dpi);
+    heatmapHeight = app_scale(430, dpi);
+
     xPos = workArea.left + ((workArea.right - workArea.left) - heatmapWidth) / 2;
     yPos = workArea.top + ((workArea.bottom - workArea.top) - heatmapHeight) / 2;
     if (xPos < workArea.left) xPos = workArea.left;
