@@ -2253,14 +2253,14 @@ static void toast_layout_children(HWND hwnd, UINT dpi) {
     int closeSize = toast_scale(22, dpi);
     int margin = toast_scale(8, dpi);
     int gap = toast_scale(4, dpi);
-    int smallFontSize = toast_scale(12, dpi);
-    int btnFontSize = toast_scale(17, dpi);
+    int smallFontSize = -toast_scale(15, dpi);
+    int btnFontSize = -toast_scale(17, dpi);
 
     if (g_hToastSmallBtnFont) {
         DeleteObject(g_hToastSmallBtnFont);
         g_hToastSmallBtnFont = NULL;
     }
-    g_hToastSmallBtnFont = CreateFontW(smallFontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    g_hToastSmallBtnFont = CreateFontW(smallFontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
     if (g_hToastBtnFont) {
@@ -2268,7 +2268,7 @@ static void toast_layout_children(HWND hwnd, UINT dpi) {
         g_hToastBtnFont = NULL;
     }
     g_hToastBtnFont = CreateFontW(btnFontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei");
 
     if (g_toast_collapsed) {
         if (g_hToastButton) ShowWindow(g_hToastButton, SW_HIDE);
@@ -2469,14 +2469,12 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (g_toast_collapsed) {
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, RGB(255, 255, 255));
-                int collapsedFontSize = toast_scale(13, dpi);
+                int collapsedFontSize = -toast_scale(16, dpi);
                 HFONT hFont = CreateFontW(collapsedFontSize, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                         DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                                         DEFAULT_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei");
                 HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
-                RECT textRc = rect;
-                textRc.top = toast_scale(30, dpi);
-                DrawTextW(hdc, L"提醒", -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                DrawTextW(hdc, L"提醒", -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 SelectObject(hdc, hOldFont);
                 DeleteObject(hFont);
             } else {
@@ -2512,10 +2510,10 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 // Draw message text in white
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, RGB(255, 255, 255));
-                int titleFontSize = toast_scale(20, dpi);
+                int titleFontSize = -toast_scale(20, dpi);
                 HFONT hFont = CreateFontW(titleFontSize, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                         DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                                         DEFAULT_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei");
                 HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
 
                 int pad = toast_scale(15, dpi);

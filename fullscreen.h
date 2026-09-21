@@ -573,13 +573,28 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
     digits = CreateFontW(-size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, digit_font);
     previous = SelectObject(dc, digits);
-    GetTextExtentPoint32W(dc, view->time, (int)wcslen(view->time), &measured);
-    if (measured.cx > width * 4 / 5) {
-        size = max(6, MulDiv(size, width * 4 / 5, measured.cx));
-        SelectObject(dc, previous); DeleteObject(digits);
-        digits = CreateFontW(-size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, digit_font);
-        SelectObject(dc, digits);
+    if (view->time[0] == L'+') {
+        const wchar_t *digits_text = view->time + 1;
+        SIZE size_p = {0}, size_d = {0};
+        GetTextExtentPoint32W(dc, L"+", 1, &size_p);
+        GetTextExtentPoint32W(dc, digits_text, (int)wcslen(digits_text), &size_d);
+        int sym_w = size_d.cx + size_p.cx * 2;
+        if (sym_w > width * 4 / 5) {
+            size = max(6, MulDiv(size, width * 4 / 5, sym_w));
+            SelectObject(dc, previous); DeleteObject(digits);
+            digits = CreateFontW(-size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, digit_font);
+            SelectObject(dc, digits);
+        }
+    } else {
+        GetTextExtentPoint32W(dc, view->time, (int)wcslen(view->time), &measured);
+        if (measured.cx > width * 4 / 5) {
+            size = max(6, MulDiv(size, width * 4 / 5, measured.cx));
+            SelectObject(dc, previous); DeleteObject(digits);
+            digits = CreateFontW(-size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, digit_font);
+            SelectObject(dc, digits);
+        }
     }
     GetTextMetricsW(dc, &tm_digits);
     if (view->signature[0]) {
@@ -616,7 +631,30 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
 
     line = bounds; line.top = top; line.bottom = top + tm_digits.tmHeight;
     SelectObject(dc, digits);
-    DrawTextW(dc, view->time, -1, &line, DT_CENTER | DT_NOPREFIX | DT_SINGLELINE);
+    if (view->time[0] == L'+') {
+        const wchar_t *prefix = L"+";
+        const wchar_t *digits_text = view->time + 1;
+        SIZE size_p = {0}, size_d = {0};
+        GetTextExtentPoint32W(dc, prefix, 1, &size_p);
+        GetTextExtentPoint32W(dc, digits_text, (int)wcslen(digits_text), &size_d);
+
+        int center_x = bounds.left + width / 2;
+        int d_left = center_x - size_d.cx / 2;
+        int p_left = d_left - size_p.cx;
+
+        RECT r_prefix = line;
+        r_prefix.left = p_left;
+        r_prefix.right = d_left;
+
+        RECT r_digits = line;
+        r_digits.left = d_left;
+        r_digits.right = d_left + size_d.cx;
+
+        DrawTextW(dc, prefix, 1, &r_prefix, DT_LEFT | DT_NOPREFIX | DT_SINGLELINE);
+        DrawTextW(dc, digits_text, -1, &r_digits, DT_LEFT | DT_NOPREFIX | DT_SINGLELINE);
+    } else {
+        DrawTextW(dc, view->time, -1, &line, DT_CENTER | DT_NOPREFIX | DT_SINGLELINE);
+    }
 
     current_y = top + tm_digits.tmAscent;
     if (status_height) {
