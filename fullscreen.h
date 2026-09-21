@@ -645,7 +645,7 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
         line.top = bounds.bottom - hud_size * 5; line.bottom = bounds.bottom - hud_size;
         SetTextColor(dc, RGB(150, 155, 160));
         DrawTextW(dc, fs_preview_active ? L"左键 / 中键 / Esc：返回编辑" :
-            L"左键 / 中键 / Esc：退出全屏    右键：开始 / 停止\n中键点击托盘图标：所有屏幕全屏", -1,
+            L"左键 / 中键 / Esc：退出全屏    右键：开始 / 停止\n中键点击托盘：全部全屏    拖动托盘图标：目标屏幕全屏", -1,
             &line, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
         SelectObject(dc, previous); DeleteObject(font);
     }
@@ -928,6 +928,24 @@ static void fs_show_all(void) {
     if (!fs_count) fs_exit();
     else { SetForegroundWindow(fs_windows[0]); SetFocus(fs_windows[0]); }
     if (!ok) MessageBoxW(g_main_hwnd, L"部分屏幕无法进入全屏，请重试。计时不受影响。", L"全屏", MB_OK | MB_ICONERROR);
+}
+/* Idempotent drag target: add this screen, preserving every existing screen. */
+static void fs_show_at_point(POINT point) {
+    FullscreenMonitors monitors;
+    size_t i;
+    if (fs_preview_active || !fs_get_monitors(&monitors)) return;
+    for (i = 0; i < monitors.count; ++i) {
+        if (!PtInRect(&monitors.items[i].info.rcMonitor, point)) continue;
+        if (!fs_begin()) return;
+        if (!fs_add_screen(&monitors.items[i])) {
+            if (!fs_count) fs_exit();
+            MessageBoxW(g_main_hwnd, L"无法为此屏幕创建全屏窗口。计时不受影响。", L"全屏", MB_OK | MB_ICONERROR);
+        } else {
+            int index = fs_window_index(monitors.items[i].identity);
+            if (index >= 0) { SetForegroundWindow(fs_windows[index]); SetFocus(fs_windows[index]); }
+        }
+        return;
+    }
 }
 static void fs_toggle_screen(size_t index) {
     FullscreenMonitors current;

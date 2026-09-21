@@ -3,6 +3,24 @@
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
+#include <string.h>
+static int test_tray_rect_enabled;
+static RECT test_tray_rect;
+static int test_tray_rect_queries;
+static void (*test_tray_rect_during_query)(void);
+static HRESULT WINAPI test_get_tray_rect(const void *identifier, RECT *rect) {
+    (void)identifier;
+    ++test_tray_rect_queries;
+    *rect = test_tray_rect;
+    if (test_tray_rect_during_query) test_tray_rect_during_query();
+    return S_OK;
+}
+static FARPROC WINAPI test_get_proc_address(HMODULE module, LPCSTR name) {
+    if (test_tray_rect_enabled && (UINT_PTR)name > 65535 && !strcmp(name, "Shell_NotifyIconGetRect"))
+        return (FARPROC)(void *)test_get_tray_rect;
+    return GetProcAddress(module, name);
+}
+#define GetProcAddress test_get_proc_address
 static BOOL WINAPI test_track_popup_menu(HMENU, UINT, int, int, int, HWND, const RECT *);
 #define TrackPopupMenu test_track_popup_menu
 #define WinMain PomodoroOriginalWinMain
@@ -96,6 +114,8 @@ static void pump(unsigned milliseconds) {
         Sleep(10);
     } while (GetTickCount64() < end);
 }
+
+#include "tray_drag_test.h"
 
 static int monitor_count;
 static BOOL CALLBACK count_monitors(HMONITOR monitor, HDC dc, LPRECT rect, LPARAM value) {
@@ -671,6 +691,7 @@ int wmain(int argc, wchar_t **argv) {
 
     test_screen_selection();
     test_monitor_ordering();
+    test_tray_drag();
     test_signature();
 
     /* Test right click toggle and mouse hover HUD prompt in fullscreen */

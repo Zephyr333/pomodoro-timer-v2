@@ -108,7 +108,7 @@ STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "关于番茄钟"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT           "番茄钟计时器 v2.5.22", IDC_ABOUT_TITLE, 10, 10, 160, 10
+    LTEXT           "番茄钟计时器 v2.5.23", IDC_ABOUT_TITLE, 10, 10, 160, 10
     LTEXT           "一个简洁的效率工具", IDC_ABOUT_SUBTITLE, 10, 25, 160, 10
     LTEXT           "作者: Ferenc Lutischan", IDC_ABOUT_AUTHOR, 10, 40, 160, 10
     LTEXT           "访问项目主页", IDC_WEBSITE, 10, 55, 160, 10, SS_NOTIFY
@@ -122,8 +122,8 @@ IDI_ICON1 ICON "pomodoro-timer.ico"
 #endif
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 2,5,22,0
- PRODUCTVERSION 2,5,22,0
+ FILEVERSION 2,5,23,0
+ PRODUCTVERSION 2,5,23,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -136,11 +136,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Pomodoro Timer Contributors\0"
             VALUE "FileDescription", "番茄钟计时器\0"
-            VALUE "FileVersion", "2.5.22\0"
+            VALUE "FileVersion", "2.5.23\0"
             VALUE "InternalName", "pomodoro-timer\0"
             VALUE "OriginalFilename", "pomodoro-timer.exe\0"
             VALUE "ProductName", "番茄钟计时器\0"
-            VALUE "ProductVersion", "2.5.22\0"
+            VALUE "ProductVersion", "2.5.23\0"
         END
     END
     BLOCK "VarFileInfo"

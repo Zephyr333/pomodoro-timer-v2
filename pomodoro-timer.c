@@ -5,7 +5,7 @@
 #define _UNICODE
 #endif
 #ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0501
+#define _WIN32_WINNT 0x0600
 #endif
 #include <windows.h>
 #include <shellapi.h>
@@ -492,6 +492,7 @@ static TimerMode get_default_break_mode(void);
 static void close_toast_notification_if_open(void);
 static void center_window_on_work_area(HWND hwnd);
 #include "fullscreen.h"
+#include "tray_drag.h"
 
 static int clamp_int(int value, int minValue, int maxValue) {
     if (value < minValue) return minValue;
@@ -2124,7 +2125,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.22");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.23");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -3079,6 +3080,7 @@ void generate_and_open_report(HWND hwnd) {
 // Main window procedure
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (g_taskbar_created_message && msg == g_taskbar_created_message) {
+        td_cancel();
         Shell_NotifyIconW(NIM_ADD, &nid);
         refresh_timer_icon_by_state(hwnd);
         return 0;
@@ -3089,6 +3091,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetTimer(hwnd, ID_MAIN_DAY_SYNC_TIMER, 30000, NULL);
             return 0;
         case WM_USER + 1: // Tray icon message
+            if (wParam == nid.uID && wParam != 0 && td_tray_message(LOWORD(lParam))) return 0;
             if (LOWORD(lParam) == WM_LBUTTONUP) {
                 // Left click: resume if paused, stop if running, otherwise start current idle mode.
                 if (is_paused) {
@@ -3653,8 +3656,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             InterlockedExchange(&fs_maintain_scheduled, 0);
             return 0;
         case WM_DISPLAYCHANGE:
+            td_cancel();
+            if (fs_active) SetTimer(hwnd, ID_FS_LAYOUT, 200, NULL);
+            return 0;
         case WM_FS_LAYOUT:
             if (fs_active) SetTimer(hwnd, ID_FS_LAYOUT, 200, NULL);
+            return 0;
+        case WM_TRAY_DRAG_INPUT:
+            td_input((DWORD)wParam);
             return 0;
         case WM_TIMER:
             if (wParam == ID_FS_REFRESH) { fs_refresh(); return 0; }
@@ -3666,6 +3675,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         case WM_DESTROY:
             // Clean up before exit
+            td_stop();
             fs_exit();
             KillTimer(hwnd, ID_MAIN_DAY_SYNC_TIMER);
             stop_timer_thread_if_needed();
@@ -4003,6 +4013,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
 
     // Show initial icon
     update_tray_icon(hwnd, L"\u25BA", pomodoro_count, 0);
+    if (!strcmp(lpCmdLine, "--tray-drag-log")) td_open_log();
+    if (!td_start(hwnd)) {
+        MessageBoxW(hwnd, L"无法启用托盘拖动全屏。仍可通过中键或全屏菜单操作。", L"番茄钟", MB_OK | MB_ICONWARNING);
+    }
 
     // Main message loop
     MSG msg;
