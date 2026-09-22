@@ -293,8 +293,116 @@ static void fs_refresh(void) {
     }
 }
 
+static int fs_is_tool_process(DWORD pid) {
+    HANDLE process;
+    wchar_t path[MAX_PATH], *base;
+    DWORD size = MAX_PATH;
+    int result = 0;
+    if (!pid || pid == GetCurrentProcessId()) return 0;
+    process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return 0;
+    if (QueryFullProcessImageNameW(process, 0, path, &size)) {
+        base = wcsrchr(path, L'\\');
+        const wchar_t *name = base ? base + 1 : path;
+        if (!_wcsnicmp(name, L"QQ", 2) ||
+            !_wcsicmp(name, L"WeChat.exe") ||
+            !_wcsicmp(name, L"WeChatAppEx.exe") ||
+            !_wcsicmp(name, L"Snipaste.exe") ||
+            !_wcsicmp(name, L"PixPin.exe") ||
+            !_wcsicmp(name, L"ScreenClippingHost.exe") ||
+            !_wcsicmp(name, L"SnippingTool.exe")) {
+            result = 1;
+        }
+    }
+    CloseHandle(process);
+    return result;
+}
+
+static int fs_is_exempt_from_suppression(HWND hwnd, DWORD process_id) {
+    HWND fg;
+    DWORD fg_pid = 0;
+    wchar_t cls[256];
+
+    if (!hwnd || !IsWindow(hwnd)) return 1;
+    if (process_id == GetCurrentProcessId()) return 1;
+
+    fg = GetForegroundWindow();
+    if (fg) {
+        GetWindowThreadProcessId(fg, &fg_pid);
+        if (hwnd == fg || (fg_pid && process_id == fg_pid)) return 1;
+    }
+
+    if (fs_is_tool_process(process_id)) return 1;
+
+    if (GetClassNameW(hwnd, cls, 256)) {
+        if (!wcscmp(cls, L"TXGuiFoundation") ||
+            wcsstr(cls, L"QQScreenShot") ||
+            wcsstr(cls, L"ScreenShot") ||
+            wcsstr(cls, L"Snipaste")) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int fs_is_suppressible_taskbar(HWND hwnd, DWORD process_id) {
+    wchar_t cls[256];
+    HANDLE process;
+    wchar_t path[MAX_PATH], *base;
+    DWORD size = MAX_PATH;
+    int is_df = 0;
+
+    if (!GetClassNameW(hwnd, cls, 256)) return 0;
+
+    if (!wcscmp(cls, L"Shell_TrayWnd") || !wcscmp(cls, L"Shell_SecondaryTrayWnd")) {
+        return 1;
+    }
+
+    if (!wcsncmp(cls, L"DFTaskbar", 9) || !wcsncmp(cls, L"DisplayFusionTaskbar", 20)) {
+        return 1;
+    }
+
+    process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (process) {
+        if (QueryFullProcessImageNameW(process, 0, path, &size)) {
+            base = wcsrchr(path, L'\\');
+            if (!_wcsicmp(base ? base + 1 : path, L"DisplayFusion.exe")) {
+                is_df = 1;
+            }
+        }
+        CloseHandle(process);
+    }
+
+    return is_df;
+}
+
+static int fs_should_skip_topmost(void) {
+    HWND fg = GetForegroundWindow();
+    DWORD fg_pid = 0;
+    size_t i;
+
+    if (!fg) return 0;
+    GetWindowThreadProcessId(fg, &fg_pid);
+    if (fg_pid == GetCurrentProcessId()) return 0;
+
+    for (i = 0; i < fs_count; ++i) {
+        if (fs_windows[i] == fg) return 0;
+    }
+
+    if (GetWindowLongW(fg, GWL_EXSTYLE) & WS_EX_TOPMOST) {
+        return 1;
+    }
+    if (fs_is_exempt_from_suppression(fg, fg_pid)) {
+        return 1;
+    }
+
+    return 0;
+}
+
 static void fs_enforce_topmost(void) {
     size_t i;
+    if (fs_should_skip_topmost()) return;
     for (i = 0; i < fs_count; ++i) {
         if (fs_windows[i] && IsWindow(fs_windows[i])) {
             SetWindowPos(fs_windows[i], HWND_TOPMOST, 0, 0, 0, 0,
@@ -333,6 +441,9 @@ static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
 
     GetWindowThreadProcessId(hwnd, &process_id);
     if (process_id == GetCurrentProcessId()) return TRUE;
+
+    if (fs_is_exempt_from_suppression(hwnd, process_id)) return TRUE;
+    if (!fs_is_suppressible_taskbar(hwnd, process_id)) return TRUE;
 
     if (!GetWindowRect(hwnd, &rect)) return TRUE;
     if ((rect.right - rect.left) < 30 || (rect.bottom - rect.top) < 20) return TRUE;
@@ -394,6 +505,11 @@ static void CALLBACK fs_winevent_proc(HWINEVENTHOOK hook, DWORD event, HWND hwnd
     (void)hook; (void)event; (void)hwnd; (void)dwEventThread; (void)dwmsEventTime;
     if (idObject != (LONG)OBJID_WINDOW || idChild != CHILDID_SELF) return;
     if (!fs_active || !fs_count) return;
+    if (hwnd && IsWindow(hwnd)) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (fs_is_exempt_from_suppression(hwnd, pid)) return;
+    }
     if (InterlockedExchange(&fs_maintain_scheduled, 1) == 1) return;
     if (g_main_hwnd && IsWindow(g_main_hwnd)) {
         PostMessageW(g_main_hwnd, WM_FS_MAINTAIN_LAYER, 1, 0);
