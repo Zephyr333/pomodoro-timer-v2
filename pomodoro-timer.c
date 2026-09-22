@@ -2195,7 +2195,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.26");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.25");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
