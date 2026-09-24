@@ -67,6 +67,7 @@
 #define ID_MENU_START_COUNT_UP 345
 #define ID_MENU_IDLE_COUNT_UP 346
 #define ID_MENU_ENABLE_OVERTIME 347
+#define ID_MENU_ENABLE_POMODORO_COUNT 361
 #define TOAST_WINDOW_CLASS L"PomodoroToastClass"
 #define HEATMAP_WINDOW_CLASS L"PomodoroHeatmapClass"
 #define WM_TOAST_NOTIFY (WM_APP + 100)
@@ -311,6 +312,7 @@ typedef struct {
     int default_pomodoro_is_long;
     int default_break_is_long;
     int enable_overtime_count_up;
+    int enable_pomodoro_count;
     int fullscreen_colors[FS_COLOR_COUNT];
     int fullscreen_scales[FS_COLOR_COUNT];
     wchar_t fullscreen_fonts[FS_COLOR_COUNT][32];
@@ -349,8 +351,8 @@ typedef struct {
 } DayCount;
 
 // Global variables
-TimerSettings settings = {90, 2, 45, 5, 15, 10, 5, 10, 0, 1, 1, 1, 0, 1,
-    {0x7F8C98, 0x829889, 0x8C86A3, 0xA39182, 0xC79A52}};
+TimerSettings settings = {90, 2, 45, 5, 15, 10, 5, 10, 0, 1, 1, 1, 0, 1, 1,
+    {0x7F8C98, 0x829889, 0x8C86A3, 0xA39182, 0xC79A52, 0xC4B8A8}};
 int pomodoro_count = 0;
 int is_running = 0;
 int is_paused = 0;
@@ -1269,6 +1271,7 @@ static void reset_defaults_keep_data(void) {
     settings.default_pomodoro_is_long = 1;
     settings.default_break_is_long = 0;
     settings.enable_overtime_count_up = 1;
+    settings.enable_pomodoro_count = 1;
     memcpy(settings.fullscreen_colors, fs_default_colors, sizeof(fs_default_colors));
     memcpy(settings.fullscreen_scales, fs_default_scales, sizeof(fs_default_scales));
     {
@@ -1430,7 +1433,7 @@ void RefreshMenuText(void) {
 
 // Create dynamic tray icon with text and dots
 HICON create_tray_icon(const wchar_t* text, int dots) {
-    int visible_dots = get_visible_dots(dots);
+    int visible_dots = settings.enable_pomodoro_count ? get_visible_dots(dots) : 0;
     HDC hdc = NULL;
     HDC hdcMask = NULL;
     HBITMAP hBitmap = NULL;
@@ -1723,6 +1726,7 @@ static void credit_count_up_thresholds(HWND hwnd) {
     int delta;
     int targetCount;
 
+    if (!settings.enable_pomodoro_count) return;
     if (!is_count_up_timer || current_timer_mode != TIMER_COUNT_UP || count_up_threshold_seconds <= 0) return;
     reached = remaining_seconds / count_up_threshold_seconds;
     if (reached <= count_up_credited) return;
@@ -1915,13 +1919,15 @@ DWORD WINAPI timer_thread(LPVOID lpParam) {
             LONG completed_fs_session = InterlockedCompareExchange(&fs_session, 0, 0);
 
             if (is_pomodoro_mode(current_timer_mode)) {
-                int completedCount = current_timer_mode == TIMER_LONG_POMODORO ? settings.long_pomodoro_count : 1;
-                if (record_completed_pomodoros(completedCount)) {
-                    pomodoro_count = get_today_count_from_storage();
-                } else {
-                    pomodoro_count = clamp_int(get_today_count_from_storage() + completedCount, 0, 9999);
-                    if (!sync_today_count_to_target(pomodoro_count)) {
-                        OutputDebugStringA("Failed to persist completion to both log and adjustment files.\n");
+                if (settings.enable_pomodoro_count) {
+                    int completedCount = current_timer_mode == TIMER_LONG_POMODORO ? settings.long_pomodoro_count : 1;
+                    if (record_completed_pomodoros(completedCount)) {
+                        pomodoro_count = get_today_count_from_storage();
+                    } else {
+                        pomodoro_count = clamp_int(get_today_count_from_storage() + completedCount, 0, 9999);
+                        if (!sync_today_count_to_target(pomodoro_count)) {
+                            OutputDebugStringA("Failed to persist completion to both log and adjustment files.\n");
+                        }
                     }
                 }
             }
@@ -2195,7 +2201,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.25");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.26");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -2515,33 +2521,35 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 SelectObject(hdc, hOldFont);
                 DeleteObject(hFont);
             } else {
-                // Draw progress dots (4) above the action button
-                int totalDots = 4;
-                int dotR = toast_scale(6, dpi); // radius
-                int spacing = toast_scale(12, dpi);
-                int dotDiameter = dotR * 2;
-                int totalWidth = totalDots * dotDiameter + (totalDots - 1) * spacing;
-                int startX = (rect.right - totalWidth) / 2;
-                int btnH = toast_scale(40, dpi);
-                int btnMarginBottom = toast_scale(15, dpi);
-                int dotsMarginAboveBtn = toast_scale(16, dpi);
-                int dotsY = rect.bottom - btnH - btnMarginBottom - dotsMarginAboveBtn;
+                if (settings.enable_pomodoro_count) {
+                    // Draw progress dots (4) above the action button
+                    int totalDots = 4;
+                    int dotR = toast_scale(6, dpi); // radius
+                    int spacing = toast_scale(12, dpi);
+                    int dotDiameter = dotR * 2;
+                    int totalWidth = totalDots * dotDiameter + (totalDots - 1) * spacing;
+                    int startX = (rect.right - totalWidth) / 2;
+                    int btnH = toast_scale(40, dpi);
+                    int btnMarginBottom = toast_scale(15, dpi);
+                    int dotsMarginAboveBtn = toast_scale(16, dpi);
+                    int dotsY = rect.bottom - btnH - btnMarginBottom - dotsMarginAboveBtn;
 
-                // Determine how many dots should be green: show up to 4 completed pomodoros
-                int greenCount = get_visible_dots(pomodoro_count);
+                    // Determine how many dots should be green: show up to 4 completed pomodoros
+                    int greenCount = get_visible_dots(pomodoro_count);
 
-                for (int i = 0; i < totalDots; i++) {
-                    int cx = startX + i * (dotDiameter + spacing);
-                    int left = cx;
-                    int top = dotsY - dotR;
-                    int right = cx + dotDiameter;
-                    int bottom = dotsY + dotR;
+                    for (int i = 0; i < totalDots; i++) {
+                        int cx = startX + i * (dotDiameter + spacing);
+                        int left = cx;
+                        int top = dotsY - dotR;
+                        int right = cx + dotDiameter;
+                        int bottom = dotsY + dotR;
 
-                    HBRUSH fill = CreateSolidBrush((i < greenCount) ? RGB(144, 238, 144) : RGB(0, 0, 0));
-                    HBRUSH old = (HBRUSH)SelectObject(hdc, fill);
-                    Ellipse(hdc, left, top, right, bottom);
-                    SelectObject(hdc, old);
-                    DeleteObject(fill);
+                        HBRUSH fill = CreateSolidBrush((i < greenCount) ? RGB(144, 238, 144) : RGB(0, 0, 0));
+                        HBRUSH old = (HBRUSH)SelectObject(hdc, fill);
+                        Ellipse(hdc, left, top, right, bottom);
+                        SelectObject(hdc, old);
+                        DeleteObject(fill);
+                    }
                 }
 
                 // Draw message text in white
@@ -2652,7 +2660,11 @@ void ShowCompletionNotification(HWND hwnd, int completed_mode) {
     // Create toast window with message in window title (for debugging)
     // Store message pointer for use in WM_PAINT
     static wchar_t toastMessage[256] = {0};
-    swprintf(toastMessage, 256, L"%ls\n今日累计: %d", message, pomodoro_count);
+    if (settings.enable_pomodoro_count) {
+        swprintf(toastMessage, 256, L"%ls\n今日累计: %d", message, pomodoro_count);
+    } else {
+        swprintf(toastMessage, 256, L"%ls", message);
+    }
 
     g_hToastWnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
@@ -3425,9 +3437,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_PLUS_5_MIN, L"增加步进时间");
                 AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_MINUS_5_MIN, L"减少步进时间");
                 AppendMenu(hAdjustMenu, MF_SEPARATOR, 0, NULL);
-                AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_SET_COUNT, L"修改今日番茄数");
-                AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_RESET_COUNT, L"番茄计数清零");
-                AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_SET_LONG_POMODORO_COUNT, L"长番茄钟番茄钟数");
+                UINT countAdjustAvailability = (is_running || is_paused || !settings.enable_pomodoro_count) ? MF_GRAYED : MF_ENABLED;
+                AppendMenu(hAdjustMenu, MF_STRING | countAdjustAvailability, ID_MENU_SET_COUNT, L"修改今日番茄数");
+                AppendMenu(hAdjustMenu, MF_STRING | countAdjustAvailability, ID_MENU_RESET_COUNT, L"番茄计数清零");
+                AppendMenu(hAdjustMenu, MF_STRING | countAdjustAvailability, ID_MENU_SET_LONG_POMODORO_COUNT, L"长番茄钟番茄钟数");
 
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_POMODORO_DURATION, L"长番茄钟时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_SHORT_POMODORO_DURATION, L"短番茄钟时长(分钟)");
@@ -3440,6 +3453,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hOptionMenu, MF_STRING | (settings.enable_clock_sound ? MF_CHECKED : 0), 4, L"时钟音效");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.enable_completion_sound ? MF_CHECKED : 0), ID_MENU_COMPLETION_SOUND, L"完成声音");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.show_completion_dialog ? MF_CHECKED : 0), 9, L"完成后弹窗");
+                AppendMenu(hOptionMenu, MF_STRING | (settings.enable_pomodoro_count ? MF_CHECKED : 0), ID_MENU_ENABLE_POMODORO_COUNT, L"番茄钟计数");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.enable_overtime_count_up ? MF_CHECKED : 0), ID_MENU_ENABLE_OVERTIME, L"超时正计时");
                 AppendMenu(hOptionMenu, MF_STRING | (autostart_enabled ? MF_CHECKED : 0), 5, L"开机启动");
                 AppendMenu(hOptionMenu, MF_SEPARATOR, 0, NULL);
@@ -3611,6 +3625,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         settings.show_completion_dialog = !settings.show_completion_dialog;
                         save_settings();
                         break;
+                    case ID_MENU_ENABLE_POMODORO_COUNT:
+                        settings.enable_pomodoro_count = !settings.enable_pomodoro_count;
+                        save_settings();
+                        refresh_timer_icon_by_state(hwnd);
+                        break;
                     case ID_MENU_ENABLE_OVERTIME:
                         settings.enable_overtime_count_up = !settings.enable_overtime_count_up;
                         save_settings();
@@ -3650,6 +3669,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                     }
                     case ID_MENU_SET_LONG_POMODORO_COUNT: {
+                        if (!settings.enable_pomodoro_count) break;
                         int count = settings.long_pomodoro_count;
                         if (PromptForInteger(hwnd, L"长番茄钟番茄钟数", L"请输入长番茄钟完成后计入的番茄钟数(1-12):", count, 1, 12, &count)) {
                             settings.long_pomodoro_count = count;
@@ -3726,6 +3746,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                     }
                     case ID_MENU_RESET_COUNT:
+                        if (!settings.enable_pomodoro_count) break;
                         if (is_running || is_paused) {
                             MessageBoxW(hwnd, L"计时进行中，无法修改今日计数。", L"提示", MB_OK | MB_ICONINFORMATION);
                             break;
@@ -3799,6 +3820,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         }
                         break;
                     case ID_MENU_SET_COUNT: {
+                        if (!settings.enable_pomodoro_count) break;
                         if (is_running || is_paused) {
                             MessageBoxW(hwnd, L"计时进行中，无法修改今日计数。", L"提示", MB_OK | MB_ICONINFORMATION);
                             break;
@@ -4054,6 +4076,7 @@ void load_settings() {
     settings.show_completion_dialog = 1;
     settings.default_pomodoro_is_long = 1;
     settings.default_break_is_long = 0;
+    settings.enable_pomodoro_count = 1;
     settings.enable_overtime_count_up = 1;
     memcpy(settings.fullscreen_colors, fs_default_colors, sizeof(fs_default_colors));
     memcpy(settings.fullscreen_scales, fs_default_scales, sizeof(fs_default_scales));
@@ -4087,6 +4110,7 @@ void load_settings() {
             settings.show_completion_dialog = extract_json_int(buf, "\"show_completion_dialog\"", settings.show_completion_dialog);
             settings.default_pomodoro_is_long = extract_json_int(buf, "\"default_pomodoro_is_long\"", settings.default_pomodoro_is_long);
             settings.default_break_is_long = extract_json_int(buf, "\"default_break_is_long\"", settings.default_break_is_long);
+            settings.enable_pomodoro_count = extract_json_int(buf, "\"enable_pomodoro_count\"", settings.enable_pomodoro_count);
             settings.enable_overtime_count_up = extract_json_int(buf, "\"enable_overtime_count_up\"", settings.enable_overtime_count_up);
             {
                 int i;
@@ -4129,6 +4153,7 @@ void load_settings() {
     settings.show_completion_dialog = settings.show_completion_dialog ? 1 : 0;
     settings.default_pomodoro_is_long = settings.default_pomodoro_is_long ? 1 : 0;
     settings.default_break_is_long = settings.default_break_is_long ? 1 : 0;
+    settings.enable_pomodoro_count = settings.enable_pomodoro_count ? 1 : 0;
     settings.enable_overtime_count_up = settings.enable_overtime_count_up ? 1 : 0;
     pomodoro_count = clamp_int(pomodoro_count, 0, 9999);
     if (idle_mode != IDLE_POMODORO && idle_mode != IDLE_BREAK && idle_mode != IDLE_CUSTOM && idle_mode != IDLE_COUNT_UP) {
@@ -4154,12 +4179,12 @@ int save_settings(void) {
 
     FILE* fp = _wfopen(g_settings_tmp_path, L"w");
     if (fp) {
-        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"enable_overtime_count_up\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d,\"fullscreen_focus_color\":%d,\"fullscreen_break_color\":%d,\"fullscreen_count_up_color\":%d,\"fullscreen_custom_color\":%d,\"fullscreen_overtime_color\":%d,\"fullscreen_signature_color\":%d,\"fullscreen_focus_scale\":%d,\"fullscreen_break_scale\":%d,\"fullscreen_count_up_scale\":%d,\"fullscreen_custom_scale\":%d,\"fullscreen_overtime_scale\":%d,\"fullscreen_signature_scale\":%d,\"fullscreen_show_text\":%d,\"fullscreen_show_signature\":%d,\"fullscreen_show_mouse_tips\":%d",
+        writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"toast_auto_collapse_seconds\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"show_completion_dialog\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"enable_pomodoro_count\":%d,\"enable_overtime_count_up\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d,\"fullscreen_focus_color\":%d,\"fullscreen_break_color\":%d,\"fullscreen_count_up_color\":%d,\"fullscreen_custom_color\":%d,\"fullscreen_overtime_color\":%d,\"fullscreen_signature_color\":%d,\"fullscreen_focus_scale\":%d,\"fullscreen_break_scale\":%d,\"fullscreen_count_up_scale\":%d,\"fullscreen_custom_scale\":%d,\"fullscreen_overtime_scale\":%d,\"fullscreen_signature_scale\":%d,\"fullscreen_show_text\":%d,\"fullscreen_show_signature\":%d,\"fullscreen_show_mouse_tips\":%d",
             longDuration, longDuration, settings.long_pomodoro_count, settings.short_pomodoro_duration,
             settings.short_break_duration, settings.long_break_duration, settings.custom_duration,
             settings.adjust_block_minutes, settings.toast_auto_collapse_seconds, settings.enable_clock_sound,
             settings.enable_completion_sound, settings.show_completion_dialog, settings.default_pomodoro_is_long,
-            settings.default_break_is_long, settings.enable_overtime_count_up, pomodoro_count, (int)idle_mode, idle_pomodoro_is_long, idle_break_is_long,
+            settings.default_break_is_long, settings.enable_pomodoro_count, settings.enable_overtime_count_up, pomodoro_count, (int)idle_mode, idle_pomodoro_is_long, idle_break_is_long,
             settings.fullscreen_colors[0], settings.fullscreen_colors[1], settings.fullscreen_colors[2],
             settings.fullscreen_colors[3], settings.fullscreen_colors[4], settings.fullscreen_colors[5],
             settings.fullscreen_scales[0], settings.fullscreen_scales[1], settings.fullscreen_scales[2],
