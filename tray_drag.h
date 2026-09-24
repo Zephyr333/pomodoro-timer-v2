@@ -22,6 +22,7 @@ typedef struct {
     HHOOK mouse_hook, key_hook;
     int initialized, available, dx, dy;
     TrayGesture gesture;
+    TrayGesture previous;
     DWORD assessed, confirmed, finished;
     TrayRegions initial_regions;
     UINT_PTR watchdog;
@@ -183,6 +184,7 @@ static LRESULT CALLBACK td_mouse_proc(int code, WPARAM message, LPARAM value) {
         EnterCriticalSection(&td.lock);
         if (message == WM_LBUTTONDOWN) {
             serial = td.gesture.serial + 1; if (!serial) serial = 1;
+            td.previous = td.gesture;
             memset(&td.gesture, 0, sizeof(td.gesture));
             td.gesture.serial = serial; td.gesture.started = GetTickCount();
             td.gesture.origin = td.gesture.point = input->pt;
@@ -323,7 +325,13 @@ static int td_tray_message(UINT message) {
     gesture = td_snapshot();
     if (!gesture.serial) return 0;
     td_log(message == WM_LBUTTONUP ? "callback-up" : "callback-down", gesture);
-    if (message == WM_LBUTTONUP && gesture.pressed) return 1; /* stale callback */
+    if (message == WM_LBUTTONUP && gesture.pressed) {
+        TrayGesture prev;
+        EnterCriticalSection(&td.lock);
+        prev = td.previous;
+        LeaveCriticalSection(&td.lock);
+        return prev.moved || prev.cancelled;
+    }
     if (td.confirmed == gesture.serial) {
         td_finish(gesture);
         return gesture.moved || gesture.cancelled;

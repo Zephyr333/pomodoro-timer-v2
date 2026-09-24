@@ -10,6 +10,7 @@ static HWND td_test_window(const wchar_t *cls, HWND parent, RECT rect) {
 static void td_test_down(HWND source, POINT point) {
     EnterCriticalSection(&td.lock);
     { DWORD serial = td.gesture.serial + 1;
+      td.previous = td.gesture;
       memset(&td.gesture, 0, sizeof(td.gesture)); td.gesture.serial = serial;
       td.gesture.source = source; td.gesture.origin = td.gesture.point = point;
       td.gesture.pressed = 1; td.gesture.started = GetTickCount(); }
@@ -94,6 +95,32 @@ static void test_tray_drag(void) {
     CHECK(is_running, "ordinary tray click still starts timer");
     td_test_down(tray, origin); td_test_up(origin, 0, 0);
     CHECK(!is_running, "next ordinary tray click still stops timer");
+
+    /* Rapid consecutive clicks: next DOWN begins before previous UP callback arrives. */
+    td_test_down(tray, origin);
+    EnterCriticalSection(&td.lock);
+    td.gesture.pressed = 0; td.gesture.released = GetTickCount();
+    LeaveCriticalSection(&td.lock);
+    td_test_down(tray, origin);
+    SendMessageW(g_main_hwnd, WM_USER + 1, nid.uID, WM_LBUTTONUP);
+    CHECK(is_running, "rapid click 1 toggles timer to running even if click 2 already pressed");
+    EnterCriticalSection(&td.lock);
+    td.gesture.pressed = 0; td.gesture.released = GetTickCount();
+    LeaveCriticalSection(&td.lock);
+    SendMessageW(g_main_hwnd, WM_USER + 1, nid.uID, WM_LBUTTONUP);
+    CHECK(!is_running, "rapid click 2 toggles timer to stopped");
+    td_test_down(tray, origin);
+    EnterCriticalSection(&td.lock);
+    td.gesture.pressed = 0; td.gesture.released = GetTickCount();
+    LeaveCriticalSection(&td.lock);
+    SendMessageW(g_main_hwnd, WM_USER + 1, nid.uID, WM_LBUTTONUP);
+    CHECK(is_running, "rapid click 3 toggles timer back to running");
+    td_test_down(tray, origin);
+    EnterCriticalSection(&td.lock);
+    td.gesture.pressed = 0; td.gesture.released = GetTickCount();
+    LeaveCriticalSection(&td.lock);
+    SendMessageW(g_main_hwnd, WM_USER + 1, nid.uID, WM_LBUTTONUP);
+    CHECK(!is_running, "rapid click 4 toggles timer back to stopped");
 
     /* Seal regression: another icon initially occupies the pressed position.
        Reordering then moves our icon into it. Neither UP nor a delayed own
