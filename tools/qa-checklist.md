@@ -21,9 +21,10 @@
 
 自动化入口：`tools/test_fullscreen.ps1`。使用项目内隔离数据，不调用会改注册表的恢复测试脚本。
 
-## 1. 启动与托盘
-- 启动后仅有一个托盘图标。
-- 再次启动会提示“程序已在运行”。
+## 1. 启动、托盘自愈与多屏隔离
+- 启动后仅有一个托盘图标；首次 `Shell_NotifyIcon(NIM_ADD)` 若逢 `explorer.exe` 未就绪，通过 `ID_TRAY_RETRY_TIMER` 异步补挂，不弹错误框退出。
+- 运行期 `NIM_MODIFY` 失败或收到 `TaskbarCreated` 广播时自动回退 `NIM_ADD` 重挂托盘图标；再次运行 `pomodoro-timer.exe` 会自动唤醒后台实例重挂并刷新托盘图标（不弹重复运行警告框）。
+- 多屏全屏任务栏压制严格通过 `MonitorFromWindow` (`HMONITOR`) 核对物理显示器句柄：仅压制全屏本屏上的系统/DisplayFusion 任务栏（`<1ms` 零帧隐藏），非全屏副屏上的 DisplayFusion 任务栏与 QQ 截图（`TXGuiFoundation`）100% 物理隔离不闪烁。
 - 退出后图标消失，无残留进程。
 
 ## 2. 计时基本流程
