@@ -79,6 +79,7 @@
 #define ID_HEATMAP_NEXT 3002
 #define ID_HEATMAP_TODAY 3003
 #define ID_MAIN_DAY_SYNC_TIMER 4001
+#define ID_TRAY_RETRY_TIMER 4002
 
 // Structure for localized strings
 typedef struct {
@@ -1623,7 +1624,9 @@ void update_tray_icon(HWND hwnd, const wchar_t* text, int dots, int seconds) {
 
     nid.hIcon = create_tray_icon(text, dots);
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    Shell_NotifyIcon(NIM_MODIFY, &nid);
+    if (!Shell_NotifyIconW(NIM_MODIFY, &nid)) {
+        Shell_NotifyIconW(NIM_ADD, &nid);
+    }
 }
 
 static int play_resource_sound_ex(const char* resourceName, DWORD flags) {
@@ -2201,7 +2204,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.29");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.30");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -3360,7 +3363,9 @@ void generate_and_open_report(HWND hwnd) {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (g_taskbar_created_message && msg == g_taskbar_created_message) {
         td_cancel();
-        Shell_NotifyIconW(NIM_ADD, &nid);
+        if (!Shell_NotifyIconW(NIM_MODIFY, &nid)) {
+            Shell_NotifyIconW(NIM_ADD, &nid);
+        }
         refresh_timer_icon_by_state(hwnd);
         return 0;
     }
@@ -3970,6 +3975,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (wParam == ID_FS_LAYOUT) { KillTimer(hwnd, ID_FS_LAYOUT); fs_build_windows(); return 0; }
             if (wParam == ID_MAIN_DAY_SYNC_TIMER) {
                 refresh_today_count_if_day_changed(hwnd, 0);
+                if (!Shell_NotifyIconW(NIM_MODIFY, &nid)) {
+                    Shell_NotifyIconW(NIM_ADD, &nid);
+                }
+                return 0;
+            }
+            if (wParam == ID_TRAY_RETRY_TIMER) {
+                if (Shell_NotifyIconW(NIM_MODIFY, &nid) || Shell_NotifyIconW(NIM_ADD, &nid)) {
+                    KillTimer(hwnd, ID_TRAY_RETRY_TIMER);
+                    refresh_timer_icon_by_state(hwnd);
+                }
                 return 0;
             }
             break;
@@ -3978,6 +3993,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             td_stop();
             fs_exit();
             KillTimer(hwnd, ID_MAIN_DAY_SYNC_TIMER);
+            KillTimer(hwnd, ID_TRAY_RETRY_TIMER);
             stop_timer_thread_if_needed();
             is_paused = 0;
             if (g_settings_lock_ready) {
@@ -4251,7 +4267,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         return 1;
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBoxW(NULL, L"程序已在运行，将退出本次启动。", L"提示", MB_OK | MB_ICONWARNING);
+        UINT taskbarMsg = RegisterWindowMessageW(L"TaskbarCreated");
+        HWND existingHwnd = FindWindowW(L"Pomodoro", L"Pomodoro");
+        if (existingHwnd && taskbarMsg) {
+            PostMessageW(existingHwnd, taskbarMsg, 0, 0);
+        }
         CloseHandle(hEvent);
         return 0;
     }
@@ -4308,10 +4328,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     wcsncpy(nid.szTip, g_lang->tooltip_pomodoro, sizeof(nid.szTip)/sizeof(nid.szTip[0]) - 1);
     nid.szTip[sizeof(nid.szTip)/sizeof(nid.szTip[0]) - 1] = L'\0';
     if (!Shell_NotifyIconW(NIM_ADD, &nid)) {
-        MessageBoxW(NULL, L"系统托盘图标创建失败。", L"启动失败", MB_OK | MB_ICONERROR);
-        DestroyWindow(hwnd);
-        CloseHandle(hEvent);
-        return 1;
+        SetTimer(hwnd, ID_TRAY_RETRY_TIMER, 1500, NULL);
     }
 
     // Show initial icon
