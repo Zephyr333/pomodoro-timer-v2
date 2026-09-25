@@ -169,7 +169,6 @@ static POINT fs_last_cursor;
 #endif
 
 static HWINEVENTHOOK fs_foreground_hook;
-static HWINEVENTHOOK fs_show_hook;
 static HWND *fs_hidden_windows;
 static size_t fs_hidden_count;
 static size_t fs_hidden_capacity;
@@ -293,8 +292,58 @@ static void fs_refresh(void) {
     }
 }
 
+static int fs_is_suppressible_taskbar(HWND hwnd) {
+    wchar_t cls[64];
+    if (!GetClassNameW(hwnd, cls, 64)) return 0;
+    if (_wcsicmp(cls, L"Shell_TrayWnd") == 0) return 1;
+    if (_wcsicmp(cls, L"Shell_SecondaryTrayWnd") == 0) return 1;
+    if (_wcsnicmp(cls, L"DFTaskbar", 9) == 0) return 1;
+    if (_wcsnicmp(cls, L"DisplayFusionTaskbar", 20) == 0) return 1;
+    return 0;
+}
+
+static int fs_is_foreground_on_fullscreen_monitor(void) {
+    HWND foreground = GetForegroundWindow();
+    HMONITOR fg_mon;
+    POINT pt;
+    HMONITOR cursor_mon;
+    size_t i;
+
+    if (!fs_active || !fs_count || !foreground) return 0;
+
+    for (i = 0; i < fs_count; ++i) {
+        if (foreground == fs_windows[i]) return 1;
+    }
+
+    if (GetCursorPos(&pt)) {
+        cursor_mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        if (cursor_mon) {
+            int cursor_on_fs = 0;
+            for (i = 0; i < fs_count; ++i) {
+                FullscreenMonitor *item = (FullscreenMonitor *)GetWindowLongPtrW(fs_windows[i], GWLP_USERDATA);
+                if (item && item->handle == cursor_mon) {
+                    cursor_on_fs = 1;
+                    break;
+                }
+            }
+            if (!cursor_on_fs) return 0;
+        }
+    }
+
+    fg_mon = MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL);
+    if (!fg_mon) return 0;
+
+    for (i = 0; i < fs_count; ++i) {
+        FullscreenMonitor *item = (FullscreenMonitor *)GetWindowLongPtrW(fs_windows[i], GWLP_USERDATA);
+        if (item && item->handle == fg_mon) return 1;
+    }
+
+    return 0;
+}
+
 static void fs_enforce_topmost(void) {
     size_t i;
+    if (!fs_building && !fs_is_foreground_on_fullscreen_monitor()) return;
     for (i = 0; i < fs_count; ++i) {
         if (fs_windows[i] && IsWindow(fs_windows[i])) {
             SetWindowPos(fs_windows[i], HWND_TOPMOST, 0, 0, 0, 0,
@@ -327,6 +376,8 @@ static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
     (void)lParam;
 
     if (!hwnd || !IsWindowVisible(hwnd)) return TRUE;
+
+    if (!fs_is_suppressible_taskbar(hwnd)) return TRUE;
 
     ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
     if (!(ex_style & WS_EX_TOPMOST)) return TRUE;
@@ -409,12 +460,6 @@ static void fs_start_guard(void) {
             NULL, fs_winevent_proc, 0, 0,
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     }
-    if (!fs_show_hook) {
-        fs_show_hook = SetWinEventHook(
-            EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
-            NULL, fs_winevent_proc, 0, 0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-    }
     fs_last_suppress_tick = 0;
     fs_last_topmost_tick = 0;
     fs_maintain_scheduled = 0;
@@ -425,10 +470,6 @@ static void fs_stop_guard(void) {
     if (fs_foreground_hook) {
         UnhookWinEvent(fs_foreground_hook);
         fs_foreground_hook = NULL;
-    }
-    if (fs_show_hook) {
-        UnhookWinEvent(fs_show_hook);
-        fs_show_hook = NULL;
     }
     fs_maintain_scheduled = 0;
     fs_restore_hidden_windows();
