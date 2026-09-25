@@ -169,6 +169,7 @@ static POINT fs_last_cursor;
 #endif
 
 static HWINEVENTHOOK fs_foreground_hook;
+static HWINEVENTHOOK fs_show_hook;
 static HWND *fs_hidden_windows;
 static size_t fs_hidden_count;
 static size_t fs_hidden_capacity;
@@ -302,48 +303,21 @@ static int fs_is_suppressible_taskbar(HWND hwnd) {
     return 0;
 }
 
-static int fs_is_foreground_on_fullscreen_monitor(void) {
-    HWND foreground = GetForegroundWindow();
-    HMONITOR fg_mon;
-    POINT pt;
-    HMONITOR cursor_mon;
+static int fs_is_on_fullscreen_monitor_handle(HWND hwnd) {
+    HMONITOR win_mon;
     size_t i;
-
-    if (!fs_active || !fs_count || !foreground) return 0;
-
-    for (i = 0; i < fs_count; ++i) {
-        if (foreground == fs_windows[i]) return 1;
-    }
-
-    if (GetCursorPos(&pt)) {
-        cursor_mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-        if (cursor_mon) {
-            int cursor_on_fs = 0;
-            for (i = 0; i < fs_count; ++i) {
-                FullscreenMonitor *item = (FullscreenMonitor *)GetWindowLongPtrW(fs_windows[i], GWLP_USERDATA);
-                if (item && item->handle == cursor_mon) {
-                    cursor_on_fs = 1;
-                    break;
-                }
-            }
-            if (!cursor_on_fs) return 0;
-        }
-    }
-
-    fg_mon = MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL);
-    if (!fg_mon) return 0;
-
+    if (!hwnd || !fs_count) return 0;
+    win_mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
+    if (!win_mon) return 0;
     for (i = 0; i < fs_count; ++i) {
         FullscreenMonitor *item = (FullscreenMonitor *)GetWindowLongPtrW(fs_windows[i], GWLP_USERDATA);
-        if (item && item->handle == fg_mon) return 1;
+        if (item && item->handle == win_mon) return 1;
     }
-
     return 0;
 }
 
 static void fs_enforce_topmost(void) {
     size_t i;
-    if (!fs_building && !fs_is_foreground_on_fullscreen_monitor()) return;
     for (i = 0; i < fs_count; ++i) {
         if (fs_windows[i] && IsWindow(fs_windows[i])) {
             SetWindowPos(fs_windows[i], HWND_TOPMOST, 0, 0, 0, 0,
@@ -372,6 +346,7 @@ static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
     LONG ex_style;
     RECT rect;
     POINT center;
+    HMONITOR win_mon;
     size_t i;
     (void)lParam;
 
@@ -385,6 +360,9 @@ static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
     GetWindowThreadProcessId(hwnd, &process_id);
     if (process_id == GetCurrentProcessId()) return TRUE;
 
+    win_mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
+    if (!win_mon) return TRUE;
+
     if (!GetWindowRect(hwnd, &rect)) return TRUE;
     if ((rect.right - rect.left) < 30 || (rect.bottom - rect.top) < 20) return TRUE;
 
@@ -394,6 +372,7 @@ static BOOL CALLBACK fs_suppress_enum_proc(HWND hwnd, LPARAM lParam) {
     for (i = 0; i < fs_count; ++i) {
         FullscreenMonitor *item = (FullscreenMonitor *)GetWindowLongPtrW(fs_windows[i], GWLP_USERDATA);
         if (item) {
+            if (win_mon != item->handle) continue;
             RECT mon_rect = item->info.rcMonitor;
             if (PtInRect(&mon_rect, center)) {
                 ShowWindow(hwnd, SW_HIDE);
@@ -442,9 +421,12 @@ static void fs_maintain_layer(int force_suppress) {
 
 static void CALLBACK fs_winevent_proc(HWINEVENTHOOK hook, DWORD event, HWND hwnd,
     LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
-    (void)hook; (void)event; (void)hwnd; (void)dwEventThread; (void)dwmsEventTime;
+    (void)hook; (void)dwEventThread; (void)dwmsEventTime;
     if (idObject != (LONG)OBJID_WINDOW || idChild != CHILDID_SELF) return;
     if (!fs_active || !fs_count) return;
+    if (event == EVENT_OBJECT_SHOW) {
+        if (!hwnd || !fs_is_suppressible_taskbar(hwnd) || !fs_is_on_fullscreen_monitor_handle(hwnd)) return;
+    }
     if (InterlockedExchange(&fs_maintain_scheduled, 1) == 1) return;
     if (g_main_hwnd && IsWindow(g_main_hwnd)) {
         PostMessageW(g_main_hwnd, WM_FS_MAINTAIN_LAYER, 1, 0);
@@ -460,6 +442,12 @@ static void fs_start_guard(void) {
             NULL, fs_winevent_proc, 0, 0,
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     }
+    if (!fs_show_hook) {
+        fs_show_hook = SetWinEventHook(
+            EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
+            NULL, fs_winevent_proc, 0, 0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    }
     fs_last_suppress_tick = 0;
     fs_last_topmost_tick = 0;
     fs_maintain_scheduled = 0;
@@ -470,6 +458,10 @@ static void fs_stop_guard(void) {
     if (fs_foreground_hook) {
         UnhookWinEvent(fs_foreground_hook);
         fs_foreground_hook = NULL;
+    }
+    if (fs_show_hook) {
+        UnhookWinEvent(fs_show_hook);
+        fs_show_hook = NULL;
     }
     fs_maintain_scheduled = 0;
     fs_restore_hidden_windows();
