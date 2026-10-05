@@ -582,6 +582,7 @@ static void center_window_on_work_area(HWND hwnd) {
 
 #include "fullscreen.h"
 #include "tray_drag.h"
+#include "dark_mode.h"
 
 static int clamp_int(int value, int minValue, int maxValue) {
     if (value < minValue) return minValue;
@@ -2204,7 +2205,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.30");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.31");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -2440,9 +2441,9 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 pt.y = (short)HIWORD(lParam);
                 child = ChildWindowFromPointEx(hwnd, pt, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED);
                 if (!child || child == hwnd) {
-                    // Drag toast when clicking background in either expanded or collapsed state.
-                    ReleaseCapture();
-                    SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+                    if (g_toast_collapsed && g_hToastCollapseButton) {
+                        SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_TOAST_COLLAPSE, BN_CLICKED), (LPARAM)g_hToastCollapseButton);
+                    }
                 }
             }
             return 0;
@@ -2452,17 +2453,6 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 GetWindowRect(hwnd, &rc);
                 if (!g_toast_collapsed) {
                     g_toast_expanded_rect = rc;
-                } else {
-                    UINT dpi = toast_get_dpi(hwnd);
-                    int expandedWidth = g_toast_expanded_rect.right - g_toast_expanded_rect.left;
-                    int expandedHeight = g_toast_expanded_rect.bottom - g_toast_expanded_rect.top;
-                    if (expandedWidth <= 0) expandedWidth = toast_scale(300, dpi);
-                    if (expandedHeight <= 0) expandedHeight = toast_scale(150, dpi);
-                    int collapsedWidth = toast_scale(40, dpi);
-                    g_toast_expanded_rect.left = rc.left + collapsedWidth - expandedWidth;
-                    g_toast_expanded_rect.top = rc.top;
-                    g_toast_expanded_rect.right = g_toast_expanded_rect.left + expandedWidth;
-                    g_toast_expanded_rect.bottom = rc.top + expandedHeight;
                 }
             }
             return 0;
@@ -3502,9 +3492,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 POINT pt;
                 GetCursorPos(&pt);
-                SetForegroundWindow(hwnd);
                 SetCursor(LoadCursor(NULL, IDC_ARROW));
-                int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, NULL);
+                int cmd = track_popup_menu_dark(hMenu, hwnd, pt.x, pt.y);
 
                 // Handle menu commands
                 if (cmd >= ID_MENU_SCREEN_FIRST && cmd < ID_MENU_SCREEN_FIRST + FS_MAX_MONITORS)
@@ -4011,6 +4000,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 L"配置保存失败。请检查当前数据目录是否可写、磁盘空间是否充足，或 OneDrive 是否可用。",
                 L"保存失败", MB_OK | MB_ICONERROR);
             return 0;
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED:
+            refresh_menu_theme();
+            return 0;
         default:
             return DefWindowProc(hwnd, msg, wParam, lParam);
     }
@@ -4261,6 +4254,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         }
     }
 
+    init_dark_mode();
+
     HANDLE hEvent = CreateEventW(NULL, TRUE, FALSE, L"PomodoroTimerEvent");
     if (!hEvent) {
         MessageBoxW(NULL, L"无法创建程序单实例标识。", L"启动失败", MB_OK | MB_ICONERROR);
@@ -4315,6 +4310,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         CloseHandle(hEvent);
         return 1;
     }
+    apply_dark_mode_to_window(hwnd);
     g_main_hwnd = hwnd;
     g_taskbar_created_message = RegisterWindowMessageW(L"TaskbarCreated");
 
