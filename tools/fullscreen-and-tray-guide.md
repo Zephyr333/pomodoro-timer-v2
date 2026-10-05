@@ -79,11 +79,24 @@ Windows 严禁在开机登录阶段启动带 `requireAdministrator` 的注册表
 
 1. **P/Invoke 回调委托必须声明为 `static readonly` 静态常驻字段（防 `0xc0000005` 崩溃）**  
    在 C# / .NET 中，传给 `SetWindowsHookEx`、`SetWinEventHook`、`EnumWindows`、`EnumDisplayMonitors` 的委托如果使用局部变量或匿名 Lambda，一旦 `.NET GC` 触发回收，非托管 `user32.dll` 回调悬空函数指针会直接引发无法捕获的 `AccessViolationException (0xc0000005)` 原生闪退。
-2. **原生右上方弹出托盘菜单（替代 WinForms `ContextMenuStrip`）**  
-   - `.NET WinForms` 的 `NotifyIcon.ContextMenuStrip` 内部硬编码了 `TPM_RIGHTALIGN` 且受系统 `SPI_GETMENUDROPALIGNMENT`（手写笔右撇子默认左偏）影响，导致菜单总出现在鼠标**左侧**且样式陈旧。
-   - **标准原生做法**：
-     - 调用 `uxtheme.dll` 序号 135 `SetPreferredAppMode(1 /* AllowDark */)` 与序号 136 `FlushMenuThemes()` 自动适配 Windows 11 深浅色圆角菜单。
-     - 弹出前临时执行 `SystemParametersInfoW(SPI_SETMENUDROPALIGNMENT, 0, IntPtr.Zero, 0)` 强制设为左对齐，再以 `TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD` 调用 `TrackPopupMenuEx`，确保菜单 **100% 在鼠标右上方展开**。
-     - 承载菜单的隐藏窗口必须为标准顶层工具窗口（`WS_POPUP | WS_EX_TOOLWINDOW`），不能是 `HWND_MESSAGE` 仅消息窗口，否则 `SetForegroundWindow` 会失败导致点击菜单外部无法自动收起。
+2. **原生深色模式适配与右上方弹出托盘菜单**  
+   - `.NET WinForms` 的 `NotifyIcon.ContextMenuStrip` 内部硬编码了 `TPM_RIGHTALIGN` 且受系统 `SPI_GETMENUDROPALIGNMENT`（手写笔右撇子默认左偏）影响，导致菜单总出现在鼠标**左侧**且样式陈旧；普通 Win32 菜单在 Windows 10/11 深色系统下默认依然显示刺眼的亮白底色。
+   - **工业级标准原生做法（四项闭环）**：
+     1. **内核级真实版本门禁（防系统崩溃）**：
+        - 序号 135 在 Win10 1809（Build 17763）是 `BOOL WINAPI AllowDarkModeForApp(BOOL)`；在 Win10 1903+（Build 18362+）才重构为 `PreferredAppMode WINAPI SetPreferredAppMode(PreferredAppMode)`（传参 `1 /* AllowDark */`）。
+        - 严禁调用易受清单或兼容模式篡改的 `GetVersionEx`，必须通过 `ntdll.dll!RtlGetVersion` 读取内核真实物理 Build 号。凡 Build < 17763 必须完全跳过调用，杜绝在旧系统（如 Win7/8/早期Win10）上调用未知序号引发未定义闪退。
+     2. **注入时钟严格保序（首个 UI 窗口创建前）**：
+        - `SetPreferredAppMode` / `AllowDarkModeForApp` 必须紧跟在 `SetProcessDpiAwarenessContext` 之后、**首个 Win32 窗口创建前**执行。若窗口或菜单句柄创建后再注入，系统菜单内部主题缓存状态会被锁死失效。
+        - 窗口创建后显式调用序号 133 `AllowDarkModeForWindow(hwnd, TRUE)` 标记支持。
+     3. **手写笔对齐保护与右上方稳定展开**：
+        - 弹出前临时检测并执行 `SystemParametersInfoW(SPI_SETMENUDROPALIGNMENT, 0, NULL, 0)` 强制设为左对齐，再以 `TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD` 调用 `TrackPopupMenuEx`，确保菜单 **100% 在鼠标右上方展开**；菜单退出后立即原样还原原对齐值。
+        - 承载菜单的隐藏窗口必须为标准顶层工具窗口（`WS_POPUP | WS_EX_TOOLWINDOW`），不能是 `HWND_MESSAGE` 仅消息窗口，否则 `SetForegroundWindow` 会失败导致点击菜单外部无法自动收起。
+     4. **收起后消息泵清空与系统深浅色免重启热更新**：
+        - 微软规范要求：在 `TrackPopupMenuEx` 返回后必须立即补发 `PostMessageW(hwnd, WM_NULL, 0, 0)`，排空系统通知队列，防止点击外部收起后后续右键点击失焦不响应。
+        - 主窗口 `WndProc` 必须拦截 `WM_SETTINGCHANGE` 与 `WM_THEMECHANGED` 广播并调用序号 136 `FlushMenuThemes()`；同时在每次 `WM_RBUTTONUP` 呼出菜单前主动刷新，使得用户在系统切换深浅色时无感即时生效。
 3. **`PerMonitorV2` 下无边框全屏窗口忌用 `FormWindowState.Maximized`**  
    在多屏混合 DPI 下，`Maximized` 容易被系统按主屏或 `WorkArea` 裁剪留边。应保持 `FormWindowState.Normal` + `FormBorderStyle.None`，直接通过 `EnumDisplayMonitors` + `GetMonitorInfo` 获取物理像素 `rcMonitor`，并用 `SetWindowPos` 精确覆盖。
+4. **轻量无边框 Toast / 状态提醒条的防漂移与交互法则**  
+   - **慎用 `WM_NCLBUTTONDOWN, HTCAPTION` 模拟拖动**：右下角自绘无边框通知弹窗若支持点击背景拖拽，极易在快速点击时发生误触漂移，导致弹窗脱离任务栏停靠区。
+   - **折叠状态背景点击直达展开**：当通知弹窗超时或手动折叠为边缘极窄（如 40px）的垂直提醒条时，条形背景的点击事件应直接映射为展开命令，杜绝将窄条误拖到屏幕中央，大幅优化高频使用下的单手盲操体验。
+
