@@ -1,0 +1,257 @@
+/* Real state engine and command dispatch; time is advanced without a 45-minute wait. */
+static int timer_input_case;
+static BOOL CALLBACK timer_test_input(HWND dialog, LPARAM unused) {
+    (void)unused;
+    if (!GetDlgItem(dialog, IDC_INPUT_EDIT)) return TRUE;
+    if (timer_input_case == 2) timer_advance_seconds(g_main_hwnd, 1);
+    SetDlgItemTextW(dialog, IDC_INPUT_EDIT, timer_input_case == 3 ? L"0" : L"29");
+    SendMessageW(dialog, WM_COMMAND, IDOK, 0);
+    return FALSE;
+}
+static VOID CALLBACK timer_test_input_tick(HWND hwnd, UINT message, UINT_PTR id, DWORD tick) {
+    (void)hwnd; (void)message; (void)tick;
+    KillTimer(NULL, id);
+    EnumThreadWindows(GetCurrentThreadId(), timer_test_input, 0);
+}
+
+static void timer_test_reset(void) {
+    session_rules.valid = 0;
+    stop_timer_clock();
+    clear_overtime_state();
+    clear_micro_state();
+    clear_count_up_state();
+    close_toast_notification_if_open();
+    current_timer_mode = TIMER_NONE;
+    completed_pending_mode = TIMER_NONE;
+    is_paused = 0;
+    remaining_seconds = 0;
+    ++timer_stage_generation;
+}
+
+static void test_timer_states(void) {
+    TimerSettings saved = settings;
+    FullscreenView view;
+    settings.enable_clock_sound = settings.enable_completion_sound = 0;
+    settings.show_completion_dialog = 0;
+    settings.enable_pomodoro_count = 0;
+    settings.enable_micro_break = 1;
+    settings.micro_break_interval_minutes = 15;
+    settings.micro_break_duration_minutes = 1;
+    settings.enable_overtime_count_up = 1;
+    timer_test_reset();
+
+    start_timer(g_main_hwnd, 45, TIMER_SHORT_POMODORO);
+    CHECK(timer_setting_locked(ID_MENU_ENABLE_MICRO_BREAK) && timer_setting_locked(ID_MENU_ENABLE_OVERTIME), "focus locks its current rules");
+    CHECK(!timer_setting_locked(ID_MENU_SET_POMODORO_DURATION) && !timer_setting_locked(ID_MENU_SET_TIME_BLOCK), "future duration and step size remain editable");
+    choose_menu(ID_MENU_ENABLE_MICRO_BREAK);
+    CHECK(settings.enable_micro_break == 1, "command cannot bypass a disabled focus preference");
+    timer_advance_seconds(g_main_hwnd, 15 * 60 + 120);
+    CHECK(micro.phase == MICRO_WAIT_START && is_overtime && overtime_seconds == 32 * 60, "elapsed time splits at 30 then reverses to 32");
+    CHECK(micro.extension_seconds == 120 && timer_tick_handled(1), "passive extension shifts physical tick by ordinal");
+    CHECK(timer_session_active() && !timer_can_edit_time(), "pending overtime cannot be edited");
+    choose_menu(ID_MENU_MINUS_5_MIN);
+    CHECK(overtime_seconds == 32 * 60, "overtime adjustment command is rejected");
+    timer_primary_action(g_main_hwnd);
+    CHECK(current_timer_mode == TIMER_MICRO_BREAK && micro.frozen_seconds == 32 * 60 && remaining_seconds == 60, "start freezes the real 32-minute focus");
+    choose_menu(ID_MENU_PAUSE_RESUME);
+    CHECK(is_paused && timer_can_edit_time(), "paused micro countdown can be edited");
+    timer_primary_action(g_main_hwnd);
+    CHECK(is_running && current_timer_mode == TIMER_MICRO_BREAK, "paused micro left click resumes micro");
+    choose_menu(ID_MENU_PLUS_5_MIN);
+    CHECK(remaining_seconds == 360 && micro.frozen_seconds == 32 * 60, "micro adjustment leaves frozen focus intact");
+    timer_advance_seconds(g_main_hwnd, 361);
+    CHECK(micro.phase == MICRO_WAIT_RESUME && is_overtime && overtime_seconds == 1, "micro expires to independent overtime");
+    timer_advance_seconds(g_main_hwnd, 25);
+    CHECK(micro.frozen_seconds == 32 * 60, "micro overtime never consumes frozen focus");
+    timer_primary_action(g_main_hwnd);
+    CHECK(current_timer_mode == TIMER_SHORT_POMODORO && remaining_seconds == 32 * 60 && !is_overtime, "confirmation restores exact focus time");
+    timer_advance_seconds(g_main_hwnd, 15 * 60);
+    CHECK(micro.phase == MICRO_WAIT_START && overtime_seconds == 17 * 60 && timer_tick_handled(2), "next shifted tick is 17 rather than repeated 30");
+    timer_primary_action(g_main_hwnd);
+    timer_stop_action(g_main_hwnd);
+    timer_primary_action(g_main_hwnd);
+    CHECK(current_timer_mode == TIMER_SHORT_POMODORO && remaining_seconds == 17 * 60, "ending micro early restores focus");
+    timer_advance_seconds(g_main_hwnd, 17 * 60);
+    CHECK(micro.source == TIMER_NONE && is_overtime && overtime_seconds == 0, "tail completes without another micro");
+    timer_advance_seconds(g_main_hwnd, 3600);
+    CHECK(micro.phase == MICRO_NONE && is_overtime, "completed focus overtime never produces micro");
+
+    timer_test_reset();
+    start_timer(g_main_hwnd, 45, TIMER_SHORT_POMODORO);
+    timer_advance_seconds(g_main_hwnd, 15 * 60 + 35 * 60);
+    CHECK(overtime_seconds == 65 * 60, "long pending wait passively extends focus to 80 minutes");
+    timer_primary_action(g_main_hwnd);
+    timer_stop_action(g_main_hwnd);
+    timer_primary_action(g_main_hwnd);
+    int shifted_ticks[] = {50, 35, 20};
+    int shifted_index;
+    for (shifted_index = 0; shifted_index < 3; ++shifted_index) {
+        timer_advance_seconds(g_main_hwnd, 15 * 60);
+        CHECK(micro.phase == MICRO_WAIT_START && overtime_seconds == shifted_ticks[shifted_index] * 60, "long extension includes every newly valid physical tick");
+        timer_primary_action(g_main_hwnd);
+        timer_stop_action(g_main_hwnd);
+    timer_primary_action(g_main_hwnd);
+    }
+    timer_advance_seconds(g_main_hwnd, 20 * 60);
+    CHECK(micro.source == TIMER_NONE && is_overtime, "long extension still skips the final short tail");
+    timer_test_reset();
+    settings.enable_overtime_count_up = 0;
+    start_timer(g_main_hwnd, 50, TIMER_LONG_POMODORO);
+    timer_advance_seconds(g_main_hwnd, 15 * 60);
+    CHECK(micro.phase == MICRO_WAIT_START && !is_running && remaining_seconds == 35 * 60, "50-minute first tick is 35 with overtime off");
+    CHECK(timer_setting_locked(ID_MENU_SET_LONG_POMODORO_COUNT) && timer_setting_locked(ID_MENU_RESET_DEFAULTS), "waiting preserves active settings locks");
+    fs_read_view(&view);
+    CHECK(!wcscmp(view.time, L"01:00") && !wcscmp(view.status, L"微休息 · 未开始"), "non-overtime waiting remains visible");
+    timer_primary_action(g_main_hwnd);
+    timer_advance_seconds(g_main_hwnd, 60);
+    CHECK(micro.phase == MICRO_WAIT_RESUME && !is_running && remaining_seconds == 0, "micro expiry without overtime waits at zero");
+    timer_advance_seconds(g_main_hwnd, 500);
+    CHECK(micro.frozen_seconds == 35 * 60 && !timer_can_edit_time(), "zero waiting does not run or allow adjustment");
+    fs_read_view(&view);
+    CHECK(!wcscmp(view.time, L"35:00") && !wcscmp(view.status, L"长番茄钟 · 未开始"), "expired micro is presented as a waiting stage");
+    timer_primary_action(g_main_hwnd);
+    timer_advance_seconds(g_main_hwnd, 15 * 60);
+    CHECK(micro.phase == MICRO_WAIT_START && remaining_seconds == 20 * 60, "50-minute next tick is 20");
+    start_mode_from_menu(g_main_hwnd, TIMER_CUSTOM);
+    CHECK(micro.source == TIMER_NONE && current_timer_mode == TIMER_CUSTOM, "explicit switch discards frozen context");
+
+    timer_test_reset();
+    start_timer(g_main_hwnd, 45, TIMER_SHORT_POMODORO);
+    timer_input_case = 1;
+    SetTimer(NULL, 0, 50, timer_test_input_tick);
+    choose_menu(ID_MENU_SET_TIME);
+    CHECK(remaining_seconds == 29 * 60 && current_timer_mode == TIMER_SHORT_POMODORO, "real input dialog edits focus time without resetting mode");
+    timer_advance_seconds(g_main_hwnd, 1);
+    CHECK(micro.phase == MICRO_NONE && micro.base_seconds == 45 * 60, "manual skip does not trigger or rebase");
+    timer_advance_seconds(g_main_hwnd, 14 * 60 - 1);
+    CHECK(micro.phase == MICRO_WAIT_START && remaining_seconds == 15 * 60, "manual skip retains 15-minute tick");
+    timer_test_reset();
+    start_timer(g_main_hwnd, 45, TIMER_SHORT_POMODORO);
+    remaining_seconds = 30 * 60;
+    timer_advance_seconds(g_main_hwnd, 1);
+    CHECK(micro.phase == MICRO_NONE, "setting exactly on a tick does not trigger");
+    timer_test_reset();
+    start_timer(g_main_hwnd, 45, TIMER_SHORT_POMODORO);
+    remaining_seconds = 30 * 60 + 1;
+    timer_input_case = 2;
+    SetTimer(NULL, 0, 50, timer_test_input_tick);
+    choose_menu(ID_MENU_SET_TIME);
+    CHECK(micro.phase == MICRO_WAIT_START && remaining_seconds == 30 * 60, "input opened before a tick cannot edit the new waiting phase");
+    timer_test_reset();
+    start_timer(g_main_hwnd, 15, TIMER_SHORT_POMODORO);
+    timer_advance_seconds(g_main_hwnd, 900);
+    CHECK(!timer_session_active() && micro.source == TIMER_NONE, "one-interval focus has no micro");
+    timer_test_reset();
+    start_timer(g_main_hwnd, 10, TIMER_SHORT_POMODORO);
+    timer_advance_seconds(g_main_hwnd, 600);
+    CHECK(!timer_session_active(), "shorter-than-interval focus completes directly");
+
+    settings.enable_overtime_count_up = 1;
+    {
+        TimerMode sources[] = {TIMER_SHORT_POMODORO, TIMER_SHORT_BREAK, TIMER_LONG_BREAK, TIMER_CUSTOM};
+        int i;
+        for (i = 0; i < 4; ++i) {
+            timer_test_reset();
+            start_timer(g_main_hwnd, 0, sources[i]);
+            timer_advance_seconds(g_main_hwnd, 0);
+            CHECK(is_overtime && !timer_can_edit_time(), "every completed countdown enters locked overtime");
+            TimerMode next = timer_next_mode(sources[i]);
+            is_paused = 1; stop_timer_clock();
+            timer_primary_action(g_main_hwnd);
+            CHECK(current_timer_mode == next && is_running && !is_overtime, "paused overtime click advances in one action");
+        }
+    }
+    timer_test_reset();
+    start_timer(g_main_hwnd, 5, TIMER_SHORT_BREAK);
+    CHECK(!timer_setting_locked(ID_MENU_ENABLE_MICRO_BREAK) && !timer_setting_locked(ID_MENU_ENABLE_POMODORO_COUNT) &&
+        !timer_setting_locked(ID_MENU_SET_LONG_POMODORO_COUNT) && timer_setting_locked(ID_MENU_ENABLE_OVERTIME), "ordinary break locks only relevant rules");
+    timer_test_reset();
+    start_timer(g_main_hwnd, 5, TIMER_CUSTOM);
+    CHECK(!timer_setting_locked(ID_MENU_ENABLE_MICRO_BREAK) && !timer_setting_locked(ID_MENU_ENABLE_POMODORO_COUNT), "custom does not lock irrelevant settings");
+    timer_test_reset();
+    settings.enable_pomodoro_count = 1;
+    start_timer(g_main_hwnd, 0, TIMER_COUNT_UP);
+    int threshold = count_up_threshold_seconds;
+    settings.short_pomodoro_duration += 1;
+    CHECK(timer_setting_locked(ID_MENU_ENABLE_POMODORO_COUNT) && !timer_setting_locked(ID_MENU_ENABLE_OVERTIME) && count_up_threshold_seconds == threshold, "count-up keeps its captured threshold while defaults are editable");
+    remaining_seconds = 0;
+    choose_menu(ID_MENU_PAUSE_RESUME);
+    timer_primary_action(g_main_hwnd);
+    CHECK(is_running && remaining_seconds == 0 && current_timer_mode == TIMER_COUNT_UP, "zero count-up can pause and resume");
+    timer_input_case = 3;
+    int initial_count = get_today_count_from_storage();
+    timer_advance_seconds(g_main_hwnd, threshold);
+    CHECK(count_up_credited == 1 && get_today_count_from_storage() == initial_count + 1, "count-up credits one actual threshold");
+    SetTimer(NULL, 0, 50, timer_test_input_tick);
+    choose_menu(ID_MENU_SET_TIME);
+    CHECK(remaining_seconds == 0 && count_up_credited == 1, "real count-up edit may go below previously credited threshold");
+    timer_advance_seconds(g_main_hwnd, threshold);
+    CHECK(get_today_count_from_storage() == initial_count + 1, "edited count-up does not credit the same threshold twice");
+    timer_advance_seconds(g_main_hwnd, threshold);
+    CHECK(get_today_count_from_storage() == initial_count + 2, "new higher count-up threshold is credited");
+    timer_test_reset();
+    start_timer(g_main_hwnd, 45, TIMER_SHORT_POMODORO);
+    int before_focus_count = get_today_count_from_storage();
+    timer_advance_seconds(g_main_hwnd, 15 * 60);
+    CHECK(get_today_count_from_storage() == before_focus_count, "micro due does not credit focus");
+    timer_primary_action(g_main_hwnd);
+    timer_advance_seconds(g_main_hwnd, 60);
+    CHECK(get_today_count_from_storage() == before_focus_count, "micro completion does not credit focus");
+    timer_primary_action(g_main_hwnd);
+    remaining_seconds = 1;
+    timer_advance_seconds(g_main_hwnd, 2);
+    CHECK(get_today_count_from_storage() == before_focus_count + 1, "restored short focus credits exactly once at completion");
+    timer_advance_seconds(g_main_hwnd, 1000);
+    CHECK(get_today_count_from_storage() == before_focus_count + 1, "focus overtime never duplicates statistics");
+    timer_test_reset();
+    start_timer(g_main_hwnd, 45, TIMER_LONG_POMODORO);
+    int before_long_count = get_today_count_from_storage();
+    remaining_seconds = 1;
+    timer_advance_seconds(g_main_hwnd, 1);
+    CHECK(get_today_count_from_storage() == before_long_count + settings.long_pomodoro_count, "long focus preserves its configured completion count");
+    timer_test_reset();
+    start_timer(g_main_hwnd, 0, TIMER_SHORT_POMODORO);
+    timer_advance_seconds(g_main_hwnd, 0);
+    settings.show_completion_dialog = 1;
+    settings.default_break_is_long = 0;
+    ShowCompletionNotification(g_main_hwnd, TIMER_SHORT_POMODORO);
+    choose_menu(ID_MENU_DEFAULT_LONG_BREAK);
+    wchar_t action[40];
+    GetWindowTextW(g_hToastButton, action, 40);
+    CHECK(!wcscmp(action, L"开始"), "next default updates the existing toast label");
+    SendMessageW(g_hToastWnd, WM_COMMAND, MAKEWPARAM(ID_TOAST_ACTION, BN_CLICKED), (LPARAM)g_hToastButton);
+    CHECK(current_timer_mode == TIMER_LONG_BREAK, "toast uses the same changed default as tray advancement");
+    unsigned stale_generation = timer_stage_generation;
+    start_mode_from_menu(g_main_hwnd, TIMER_CUSTOM);
+    SendMessageW(g_main_hwnd, WM_TOAST_NOTIFY, TIMER_SHORT_POMODORO, stale_generation);
+    CHECK(!g_hToastWnd && current_timer_mode == TIMER_CUSTOM, "stale completion cannot recreate a toast after switching");
+    timer_test_reset();
+    settings.enable_overtime_count_up = 0;
+    start_timer(g_main_hwnd, 45, TIMER_SHORT_POMODORO);
+    timer_advance_seconds(g_main_hwnd, 900);
+    choose_menu(9); /* turn popup off */
+    CHECK(!settings.show_completion_dialog && !g_hToastWnd && micro.phase == MICRO_WAIT_START, "disabling popup does not advance pending micro");
+    choose_menu(9); /* turn popup on */
+    CHECK(g_hToastWnd && micro.phase == MICRO_WAIT_START, "re-enabling popup restores current pending action");
+    SendMessageW(g_hToastWnd, WM_COMMAND, MAKEWPARAM(ID_TOAST_CLOSE, BN_CLICKED), 0);
+    CHECK(!g_hToastWnd && micro.phase == MICRO_WAIT_START, "closing popup keeps the waiting state");
+    timer_test_reset();
+    CHECK(!timer_can_edit_time(), "idle time adjustment is unavailable");
+    settings = saved;
+    save_settings();
+    settings.enable_micro_break = 1;
+    settings.micro_break_interval_minutes = 12;
+    settings.micro_break_duration_minutes = 2;
+    save_settings();
+    load_settings();
+    CHECK(settings.enable_micro_break && settings.micro_break_interval_minutes == 12 && settings.micro_break_duration_minutes == 2, "micro settings survive actual save and reload");
+    write_test_json(g_settings_path, "{\"pomodoro_duration\":42,\"pomodoro_count\":3,\"micro_break_interval_minutes\":0,\"micro_break_duration_minutes\":999}");
+    load_settings();
+    CHECK(!settings.enable_micro_break && settings.micro_break_interval_minutes == 1 && settings.micro_break_duration_minutes == 60, "invalid micro durations are bounded in the loader");
+    write_test_json(g_settings_path, "{\"pomodoro_duration\":42,\"pomodoro_count\":3}");
+    load_settings();
+    CHECK(!settings.enable_micro_break && settings.micro_break_interval_minutes == 15 && settings.micro_break_duration_minutes == 1, "legacy micro defaults are off 15 and 1 minute");
+    settings = saved;
+    save_settings();
+    puts("TIMER_STATE_TEST: exercised micro lifecycle, tick boundaries, locks and all overtime sources.");
+}

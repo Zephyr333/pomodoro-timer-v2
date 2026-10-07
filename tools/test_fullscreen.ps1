@@ -1,4 +1,4 @@
-param([switch]$Interactive, [switch]$Stress)
+param([switch]$Interactive, [switch]$Stress, [switch]$UiCopyOnly, [switch]$ReadyOnly, [switch]$UxOnly, [switch]$FlexibleOnly, [switch]$MicroPreviewOnly, [switch]$SurfaceOnly, [switch]$ClickOnly)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -16,6 +16,13 @@ try {
     $testArgs = @($runPath)
     if ($Interactive) { $testArgs += '--interactive' }
     if ($Stress) { $testArgs += '--stress' }
+    if ($UiCopyOnly) { $testArgs += '--ui-copy-only' }
+    if ($ReadyOnly) { $testArgs += '--ready-only' }
+    if ($UxOnly) { $testArgs += '--ux-only' }
+    if ($FlexibleOnly) { $testArgs += '--flexible-only' }
+    if ($MicroPreviewOnly) { $testArgs += '--micro-preview-only' }
+    if ($SurfaceOnly) { $testArgs += '--surface-only' }
+    if ($ClickOnly) { $testArgs += '--click-only' }
     $process = Start-Process -FilePath (Join-Path $runPath 'fullscreen_test.exe') -ArgumentList $testArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $runPath 'results.txt') -RedirectStandardError (Join-Path $runPath 'errors.txt')
     if (-not $process.WaitForExit(45000)) {
         Stop-Process -Id $process.Id -Force
@@ -27,7 +34,8 @@ try {
     Get-Content -LiteralPath (Join-Path $runPath 'errors.txt')
     Write-Host "Test artifacts: $projectRoot\$runPath"
     if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) { throw "Integration tests failed: $($process.ExitCode)" }
-    if (-not ($results -match 'FULLSCREEN_TEST: PASS \(0 failures\)')) { throw 'Integration tests failed.' }
+    $passPattern = if ($ClickOnly) { 'FULLSCREEN_CLICK_TEST: PASS \(0 failures\)' } elseif ($SurfaceOnly) { 'SURFACE_BUG_TEST: PASS \(0 failures\)' } elseif ($MicroPreviewOnly) { 'MICRO_PREVIEW_TEST: PASS \(0 failures\)' } elseif ($FlexibleOnly) { 'FLEXIBLE_CONTROLS_TEST: PASS \(0 failures\)' } elseif ($UxOnly) { 'UX_CONSISTENCY_TEST: PASS \(0 failures\)' } elseif ($ReadyOnly) { 'READY_STATE_TEST: PASS \(0 failures\)' } elseif ($UiCopyOnly) { 'UI_COPY_TEST: PASS \(0 failures\)' } else { 'FULLSCREEN_TEST: PASS \(0 failures\)' }
+    if (-not ($results -match $passPattern)) { throw 'Integration tests failed.' }
 } finally {
     Pop-Location
 }

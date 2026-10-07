@@ -4,6 +4,16 @@
 #define _UNICODE
 #include <windows.h>
 #include <string.h>
+#include <mmsystem.h>
+static int test_silent_sound;
+static BOOL WINAPI test_play_sound_a(LPCSTR sound, HMODULE module, DWORD flags) {
+    return test_silent_sound ? TRUE : PlaySoundA(sound,module,flags);
+}
+static BOOL WINAPI test_play_sound_w(LPCWSTR sound, HMODULE module, DWORD flags) {
+    return test_silent_sound ? TRUE : PlaySoundW(sound,module,flags);
+}
+#define PlaySoundA test_play_sound_a
+#define PlaySoundW test_play_sound_w
 static int test_tray_rect_enabled;
 static RECT test_tray_rect;
 static int test_tray_rect_queries;
@@ -23,6 +33,33 @@ static FARPROC WINAPI test_get_proc_address(HMODULE module, LPCSTR name) {
 #define GetProcAddress test_get_proc_address
 static BOOL WINAPI test_track_popup_menu(HMENU, UINT, int, int, int, HWND, const RECT *);
 #define TrackPopupMenu test_track_popup_menu
+static BOOL WINAPI test_track_popup_menu_ex(HMENU menu, UINT flags, int x, int y, HWND owner, LPTPMPARAMS parameters) {
+    (void)parameters;
+    return test_track_popup_menu(menu, flags, x, y, 0, owner, NULL);
+}
+#define TrackPopupMenuEx test_track_popup_menu_ex
+static BOOL WINAPI test_system_parameters(UINT action, UINT parameter, PVOID value, UINT flags) {
+    if (action == SPI_SETMENUDROPALIGNMENT) return TRUE; /* Never write a global setting from tests. */
+    return SystemParametersInfoW(action, parameter, value, flags);
+}
+#define SystemParametersInfoW test_system_parameters
+static LRESULT CALLBACK test_passthrough_input(int code, WPARAM message, LPARAM value) {
+    return CallNextHookEx(NULL, code, message, value);
+}
+static HHOOK WINAPI test_install_hook(int type, HOOKPROC callback, HINSTANCE module, DWORD thread) {
+    /* Synthetic gesture cases own td.gesture; real desktop input must not race their fixture. */
+    if (type == WH_MOUSE_LL || type == WH_KEYBOARD_LL) callback = test_passthrough_input;
+    return SetWindowsHookExW(type, callback, module, thread);
+}
+#define SetWindowsHookExW test_install_hook
+#define POMODORO_TEST_IO 1
+static int test_io_active;
+static wchar_t test_io_root[MAX_PATH], test_io_folder[MAX_PATH];
+static int WINAPI test_io_message(HWND owner, LPCWSTR text, LPCWSTR title, UINT flags) {
+    if (test_io_active) return (flags & MB_TYPEMASK) == MB_YESNO ? IDYES : IDOK;
+    return MessageBoxW(owner,text,title,flags);
+}
+#define MessageBoxW test_io_message
 #define WinMain PomodoroOriginalWinMain
 #include "../pomodoro-timer.c"
 #undef WinMain
@@ -48,29 +85,56 @@ static BOOL WINAPI test_track_popup_menu(HMENU menu, UINT flags, int x, int y, i
             CHECK(GetSubMenu(child, j) == NULL, "menu depth does not exceed two levels");
     }
     CHECK(GetMenuItemCount(session) == 3, "fullscreen moved out of session menu");
+    { int commands[]={ID_MENU_IDLE_POMODORO,ID_MENU_IDLE_SHORT_POMODORO,ID_MENU_IDLE_SHORT_BREAK,ID_MENU_IDLE_LONG_BREAK,ID_MENU_IDLE_COUNT_UP,ID_MENU_IDLE_CUSTOM};
+      int n;HMENU idle=GetSubMenu(menu,2);
+      for(n=0;n<6;++n) CHECK(!(GetMenuState(idle,commands[n],MF_BYCOMMAND)&MF_GRAYED),"idle menu disables current selection and active-state choices");
+      HMENU prefs=GetSubMenu(menu,9);int defaults[]={ID_MENU_DEFAULT_LONG_POMODORO,ID_MENU_DEFAULT_SHORT_POMODORO,ID_MENU_DEFAULT_LONG_BREAK,ID_MENU_DEFAULT_SHORT_BREAK};
+      for(n=0;n<4;++n) CHECK(!(GetMenuState(prefs,defaults[n],MF_BYCOMMAND)&MF_GRAYED),"default menu disables selected choice");
+    }
+    GetMenuStringW(session, ID_MENU_START_CURRENT, label, 80, MF_BYCOMMAND);
+    CHECK(!wcscmp(label, L"开始"), "session start wording is stable");
+    GetMenuStringW(session, ID_MENU_PAUSE_RESUME, label, 80, MF_BYCOMMAND);
+    CHECK(!wcscmp(label, timer_ui_pause_label()), "session pause label follows actual pause state");
+    CHECK(!!(GetMenuState(session, ID_MENU_START_CURRENT, MF_BYCOMMAND) & MF_GRAYED) == !timer_ui_can_start(), "start availability is shared");
+    CHECK(!!(GetMenuState(session, ID_MENU_PAUSE_RESUME, MF_BYCOMMAND) & MF_GRAYED) == !timer_ui_can_pause(), "pause availability is shared");
+    CHECK(!!(GetMenuState(session, ID_MENU_STOP, MF_BYCOMMAND) & MF_GRAYED) == !timer_ui_can_end(), "end availability is shared");
     CHECK(GetMenuItemID(fullscreen, 0) == ID_MENU_FULLSCREEN, "all screens directly accessible");
     CHECK(GetMenuItemID(fullscreen, 1) == ID_MENU_FULLSCREEN_EXIT, "exit directly accessible");
     CHECK(!!(GetMenuState(fullscreen, ID_MENU_FULLSCREEN_EXIT, MF_BYCOMMAND) & MF_GRAYED) == !fs_active, "exit enabled only while fullscreen");
     GetMenuStringW(fullscreen, ID_MENU_FULLSCREEN_SHOW_TEXT, label, 80, MF_BYCOMMAND);
-    CHECK(!wcscmp(label, L"显示状态"), "state visibility has concise unambiguous label");
+    CHECK(!wcscmp(label, L"显示模式"), "state visibility has concise unambiguous label");
     GetMenuStringW(fullscreen, ID_MENU_FULLSCREEN_SHOW_MOUSE_TIPS, label, 80, MF_BYCOMMAND);
     CHECK(!wcscmp(label, L"显示鼠标提示"), "mouse tips visibility has concise unambiguous label");
     CHECK(GetMenuState(GetSubMenu(menu, 9), ID_MENU_FULLSCREEN_SHOW_TEXT, MF_BYCOMMAND) == (UINT)-1, "fullscreen state removed from preferences");
     for (i = 0; i < (int)fs_menu_monitors.count; ++i)
         CHECK(!!(GetMenuState(fullscreen, ID_MENU_SCREEN_FIRST + i, MF_BYCOMMAND) & MF_CHECKED) ==
             (fs_window_index(fs_menu_monitors.items[i].identity) >= 0), "screen checkmark represents real active window");
-    CHECK(GetMenuItemCount(preview) == 9, "signature, separator, five preview modes, separator and reset");
+    CHECK(GetMenuItemCount(preview) == 10, "signature and six preview modes with separators and reset");
     GetMenuStringW(preview, 0, label, 80, MF_BYPOSITION);
     CHECK(!wcscmp(label, L"签名"), "signature is first preview item");
     CHECK(GetMenuItemID(preview, 0) == ID_MENU_FULLSCREEN_SIGNATURE, "signature command maps to signature dialog");
     CHECK(GetMenuItemID(preview, 1) == 0, "separator follows signature");
-    for (i = 0; i < 5; ++i) {
+    { int order[] = {0, 1, 6, 2, 3, 4};
+      for (i = 0; i < 6; ++i) {
         GetMenuStringW(preview, 2 + i, label, 80, MF_BYPOSITION);
-        CHECK(!wcscmp(label, fs_color_names[i]), "preview mode item has concise label");
-        CHECK(GetMenuItemID(preview, 2 + i) == fs_color_command(i), "preview command maps to intended mode");
+        CHECK(!wcscmp(label, fs_color_names[order[i]]), "preview mode item has concise label");
+        CHECK(GetMenuItemID(preview, 2 + i) == fs_color_command(order[i]), "preview command maps to intended mode");
+      }
     }
-    CHECK(GetMenuItemID(preview, 7) == 0, "separator precedes reset");
-    CHECK(GetMenuItemID(preview, 8) == ID_MENU_COLOR_RESET, "color reset is directly accessible");
+    CHECK(GetMenuItemID(preview, 8) == 0, "separator precedes reset");
+    CHECK(GetMenuItemID(preview, 9) == ID_MENU_COLOR_RESET, "color reset is directly accessible");
+    {
+        HMENU adjust = GetSubMenu(menu, 7), duration = GetSubMenu(menu, 8), preference = GetSubMenu(menu, 9);
+        int commands[] = {ID_MENU_SET_TIME, ID_MENU_PLUS_5_MIN, ID_MENU_MINUS_5_MIN};
+        for (i = 0; i < 3; ++i)
+            CHECK(!!(GetMenuState(adjust, commands[i], MF_BYCOMMAND) & MF_GRAYED) == !timer_can_edit_time(), "time menu matches stage edit permission");
+        CHECK(!!(GetMenuState(duration, ID_MENU_SET_TOAST_COLLAPSE_SECONDS, MF_BYCOMMAND) & MF_GRAYED) == !settings.show_completion_dialog, "collapse menu follows popup setting");
+        CHECK(GetMenuItemID(preference, 2) == 9 && GetMenuItemID(preference, 3) == ID_MENU_ENABLE_MICRO_BREAK && GetMenuItemID(preference, 4) == ID_MENU_ENABLE_POMODORO_COUNT, "micro preference is between popup and count");
+        int rules[] = {ID_MENU_ENABLE_MICRO_BREAK, ID_MENU_ENABLE_OVERTIME, ID_MENU_ENABLE_POMODORO_COUNT};
+        for (i = 0; i < 3; ++i)
+            CHECK(!!(GetMenuState(preference, rules[i], MF_BYCOMMAND) & MF_GRAYED) == !!timer_setting_locked(rules[i]), "preference menu matches per-mode rule locks");
+        CHECK(!!(GetMenuState(duration, ID_MENU_MICRO_INTERVAL, MF_BYCOMMAND) & MF_GRAYED) == !!timer_setting_locked(ID_MENU_MICRO_INTERVAL), "micro interval locks follow focus context");
+    }
     CHECK(GetMenuState(fullscreen, ID_MENU_FULLSCREEN_SIGNATURE, MF_BYCOMMAND) == (UINT)-1, "signature content moved out of fullscreen menu");
     CHECK(!!(GetMenuState(fullscreen, ID_MENU_FULLSCREEN_SHOW_SIGNATURE, MF_BYCOMMAND) & MF_CHECKED) == !!settings.fullscreen_show_signature,
         "signature visibility checkmark matches setting");
@@ -261,7 +325,8 @@ static BOOL CALLBACK exercise_dialog(HWND dialog, LPARAM unused) {
             CHECK(fs_view.signature_color == 0x123456 && fs_view.signature[0], "signature color preview shows visible sample even with empty content");
             CHECK(fs_view.color == original.color, "signature color preview does not recolor timer");
         } else {
-            CHECK(fs_view.color == 0x123456 && !wcscmp(fs_view.status, fs_color_names[dialog_index]), "color preview shows selected state rather than active timer state");
+            wchar_t expected_status[96]; timer_ui_status(expected_status, 96, ((FullscreenColorDraft *)GetWindowLongPtrW(dialog, DWLP_USER))->preview_timer);
+            CHECK(fs_view.color == 0x123456 && !wcscmp(fs_view.status, expected_status), "color preview uses the same presentation formatter as real timer");
             CHECK(!wcscmp(fs_view.font, L"Bahnschrift"), "color preview uses draft font");
             CHECK(fs_view.scale == 120, "color preview uses draft scale");
             CHECK(fs_view.signature_color == original.signature_color, "state color preview preserves independent signature color");
@@ -597,7 +662,17 @@ static void test_signature(void) {
     save_settings();
 }
 
+#include "timer_state_test.h"
+#include "ui_copy_test.h"
+#include "ready_state_test.h"
+#include "ux_consistency_test.h"
+#include "flexible_controls_test.h"
+#include "micro_preview_test.h"
+#include "surface_bug_test.h"
+#include "fullscreen_click_test.h"
+
 int wmain(int argc, wchar_t **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
     WNDCLASSW wc = {0};
     FullscreenView view;
     int i, rgb;
@@ -607,7 +682,7 @@ int wmain(int argc, wchar_t **argv) {
     HANDLE old_dpi;
     HHOOK trace_hook;
     HDESK test_desktop = NULL;
-    int interactive = 0, stress = 0;
+    int interactive = 0, stress = 0, ui_copy_only = 0, ready_only = 0, ux_only = 0, flexible_only = 0, micro_preview_only = 0, surface_only = 0, click_only = 0;
     if (argc < 2 || wcsncmp(argv[1], L"tools\\.fullscreen-test\\", 23) != 0 || wcsstr(argv[1], L"..")) {
         /* Require the script's relative output path, not a personal data path. */
         fprintf(stderr, "Usage: fullscreen_test.exe tools\\.fullscreen-test\\run-id\n"); return 2;
@@ -615,6 +690,13 @@ int wmain(int argc, wchar_t **argv) {
     for (i = 2; i < argc; ++i) {
         if (!wcscmp(argv[i], L"--interactive")) interactive = 1;
         if (!wcscmp(argv[i], L"--stress")) stress = 1;
+        if (!wcscmp(argv[i], L"--ui-copy-only")) ui_copy_only = 1;
+        if (!wcscmp(argv[i], L"--ready-only")) ready_only = 1;
+        if (!wcscmp(argv[i], L"--ux-only")) ux_only = 1;
+        if (!wcscmp(argv[i], L"--flexible-only")) flexible_only = 1;
+        if (!wcscmp(argv[i], L"--micro-preview-only")) micro_preview_only = 1;
+        if (!wcscmp(argv[i], L"--surface-only")) surface_only = 1;
+        if (!wcscmp(argv[i], L"--click-only")) click_only = 1;
     }
     if (!interactive) {
         wchar_t desktop_name[80];
@@ -646,6 +728,14 @@ int wmain(int argc, wchar_t **argv) {
     trace_hook = SetWindowsHookExW(WH_CALLWNDPROC, trace_window_messages, NULL, GetCurrentThreadId());
     CHECK(trace_hook != NULL, "window lifecycle observer installed");
 
+    if (ui_copy_only || ready_only || ux_only || flexible_only || micro_preview_only || surface_only || click_only) {
+        if (click_only) test_fullscreen_clicks(); else if (surface_only) test_surface_bugs(); else if (micro_preview_only) test_micro_preview(); else if (flexible_only) test_flexible_controls(); else if (ux_only) test_ux_consistency(); else if (ready_only) test_ready_states(); else test_ui_copy();
+        if (trace_hook) UnhookWindowsHookEx(trace_hook);
+        DestroyWindow(g_main_hwnd);
+        if (test_desktop) CloseDesktop(test_desktop);
+        return failures ? 1 : 0;
+    }
+
     CHECK(fs_parse_color(L"#7F8C98", &rgb) && rgb == 0x7F8C98, "parse supplied focus color");
     CHECK(fs_parse_color(L"c79a52", &rgb) && rgb == 0xC79A52, "parse supplied overtime color");
     CHECK(!fs_parse_color(L"#12", &rgb) && !fs_parse_color(L"#1234567", &rgb) && !fs_parse_color(L"#GGFFFF", &rgb), "reject malformed colors");
@@ -660,9 +750,9 @@ int wmain(int argc, wchar_t **argv) {
     current_timer_mode = TIMER_CUSTOM; fs_read_view(&view); CHECK(view.color == 0xA39182, "custom palette");
     is_overtime = 1; overtime_seconds = 192; overtime_source_mode = TIMER_SHORT_BREAK;
     fs_read_view(&view); CHECK(!wcscmp(view.time, L"+03:12") && view.color == 0xC79A52, "overtime overrides source palette");
-    is_running = 0; is_paused = 1; fs_read_view(&view); CHECK(wcsstr(view.status, L"已暂停") != NULL && !wcscmp(view.time, L"+03:12"), "paused overtime retains time and color");
+    is_running = 0; is_paused = 1; fs_read_view(&view); CHECK(!wcscmp(view.status, L"超时正计时 · 已暂停") && !wcscmp(view.time, L"+03:12"), "paused overtime retains time and color");
     is_paused = 0; is_overtime = 0; idle_mode = IDLE_BREAK; idle_break_is_long = 0;
-    fs_read_view(&view); CHECK(!wcscmp(view.time, L"05:00") && wcsstr(view.status, L"未开始"), "idle preview does not start timer");
+    fs_read_view(&view); CHECK(!wcscmp(view.time, L"05:00") && !wcscmp(view.status, L"短休息 · 未开始"), "idle preview does not start timer");
 
     SendMessageW(g_main_hwnd, WM_USER + 1, 0, WM_MBUTTONUP); pump(100);
     CHECK(fs_active && fs_count > 0 && !is_running, "tray middle click enters without starting");
@@ -685,9 +775,9 @@ int wmain(int argc, wchar_t **argv) {
     gdi_before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
     for (i = 0; i < (stress ? 8 : 1); ++i) {
         fs_show_all(); pump(20);
-        if (fs_count) SendMessageW(fs_windows[0], WM_LBUTTONDOWN, MK_LBUTTON, 0);
+        if (fs_count) SendMessageW(fs_windows[0], WM_MBUTTONDOWN, MK_MBUTTON, 0);
     }
-    CHECK(!fs_active && !fs_count, "click exits all overlays");
+    CHECK(!fs_active && !fs_count, "middle click exits all overlays");
 
     test_screen_selection();
     test_monitor_ordering();
@@ -740,13 +830,17 @@ int wmain(int argc, wchar_t **argv) {
     SetTimer(NULL, 0, 150, dialog_timer); choose_menu(ID_MENU_COLOR_FIRST);
     CHECK(settings.fullscreen_colors[0] == fs_default_colors[0], "cancel discards edits");
     dialog_case = 2;
-    for (dialog_index = 0; dialog_index < 5; ++dialog_index) {
+    int signature_color_before = settings.fullscreen_colors[5];
+    for (dialog_index = 0; dialog_index < FS_COLOR_COUNT; ++dialog_index) {
+        if (dialog_index == 5) continue;
         SetTimer(NULL, 0, 150, dialog_timer); choose_menu(fs_color_command(dialog_index));
         memset(settings.fullscreen_colors, 0, sizeof(settings.fullscreen_colors)); load_settings();
-        for (i = 0; i < 5; ++i) {
-            CHECK(settings.fullscreen_colors[i] == (i <= dialog_index ? 0x123456 : fs_default_colors[i]), "save changes only chosen color and survives reload");
-            CHECK(!wcscmp(settings.fullscreen_fonts[i], i <= dialog_index ? L"Bahnschrift" : fs_default_fonts[i]), "save changes font and survives reload");
-            CHECK(settings.fullscreen_scales[i] == (i <= dialog_index ? 120 : fs_default_scales[i]), "save changes scale and survives reload");
+        CHECK(settings.fullscreen_colors[5] == signature_color_before, "mode color edits preserve saved signature color");
+        for (i = 0; i < FS_COLOR_COUNT; ++i) {
+            if (i == 5) continue;
+            CHECK(settings.fullscreen_colors[i] == ((i != 5 && i <= dialog_index) ? 0x123456 : fs_default_colors[i]), "save changes only chosen color and survives reload");
+            CHECK(!wcscmp(settings.fullscreen_fonts[i], (i != 5 && i <= dialog_index) ? L"Bahnschrift" : fs_default_fonts[i]), "save changes font and survives reload");
+            CHECK(settings.fullscreen_scales[i] == ((i != 5 && i <= dialog_index) ? 120 : fs_default_scales[i]), "save changes scale and survives reload");
         }
     }
     dialog_case = 4; dialog_index = 0;
@@ -781,12 +875,12 @@ int wmain(int argc, wchar_t **argv) {
         CHECK(created == overlay_created && destroyed == overlay_destroyed, "steady refresh does not recreate fullscreen windows");
         puts("Steady fullscreen: 3.5 seconds, no overlay creation or destruction.");
     }
-    stop_timer_thread_if_needed(); clear_overtime_state(); fs_exit();
+    stop_timer_clock(); clear_overtime_state(); fs_exit();
     settings.enable_overtime_count_up = 0; settings.show_completion_dialog = 0;
     fs_show_all(); start_timer(g_main_hwnd, 0, TIMER_CUSTOM); pump(200);
-    CHECK(!is_running && fs_active && !wcscmp(fs_view.time, L"00:00") && wcsstr(fs_view.status, L"已完成"), "completion remains visible even with toast disabled");
-    stop_timer_thread_if_needed(); fs_exit();
-    fs_show_all(); CHECK(wcsstr(fs_view.status, L"未开始") != NULL, "reentry clears completed presentation"); fs_exit();
+    CHECK(!is_running && fs_active && !wcscmp(fs_view.time, L"10:00") && !wcscmp(fs_view.status, L"自定义计时 · 未开始"), "completion remains visible even with toast disabled");
+    stop_timer_clock(); fs_exit();
+    fs_show_all(); CHECK(!wcscmp(fs_view.status, L"自定义计时 · 未开始"), "reentry clears completed presentation"); fs_exit();
 
     /* Verify compatibility and the existing recovery chain without registry writes. */
     write_test_json(g_settings_path, "{\"pomodoro_duration\":42,\"pomodoro_count\":3}");
@@ -805,6 +899,7 @@ int wmain(int argc, wchar_t **argv) {
     write_test_json(g_settings_path, "corrupt");
     load_settings(); CHECK(settings.fullscreen_colors[0] == 0x654321, "backup settings recovery preserves colors");
 
+    test_timer_states();
     pump(6000);
     CHECK(IsWindow(g_main_hwnd), "main message loop remains responsive during smoke interval");
     if (trace_hook) UnhookWindowsHookEx(trace_hook);

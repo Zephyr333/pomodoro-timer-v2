@@ -8,6 +8,7 @@
 #define _WIN32_WINNT 0x0600
 #endif
 #include <windows.h>
+#include <limits.h>
 #include <shellapi.h>
 #include <commdlg.h>
 #include <stdlib.h>
@@ -68,6 +69,11 @@
 #define ID_MENU_IDLE_COUNT_UP 346
 #define ID_MENU_ENABLE_OVERTIME 347
 #define ID_MENU_ENABLE_POMODORO_COUNT 361
+#define ID_MENU_ENABLE_MICRO_BREAK 362
+#define ID_MENU_MICRO_INTERVAL 363
+#define ID_MENU_MICRO_DURATION 364
+#define ID_MENU_MICRO_COLOR 365
+#define ID_TIMER_CLOCK 4005
 #define TOAST_WINDOW_CLASS L"PomodoroToastClass"
 #define HEATMAP_WINDOW_CLASS L"PomodoroHeatmapClass"
 #define WM_TOAST_NOTIFY (WM_APP + 100)
@@ -296,7 +302,7 @@ static HMENU g_hLangMenu = NULL;
 static HMENU g_hMenu = NULL;
 
 #define FS_SIGNATURE_CAPACITY 501
-#define FS_COLOR_COUNT 6
+#define FS_COLOR_COUNT 7
 // Timer settings structure
 typedef struct {
     int long_pomodoro_duration;
@@ -321,6 +327,9 @@ typedef struct {
     int fullscreen_show_signature;
     int fullscreen_show_mouse_tips;
     wchar_t fullscreen_signature[FS_SIGNATURE_CAPACITY];
+    int enable_micro_break;
+    int micro_break_interval_minutes;
+    int micro_break_duration_minutes;
 } TimerSettings;
 
 typedef enum {
@@ -336,7 +345,8 @@ typedef enum {
     TIMER_LONG_BREAK = 3,
     TIMER_CUSTOM = 4,
     TIMER_SHORT_POMODORO = 5,
-    TIMER_COUNT_UP = 6
+    TIMER_COUNT_UP = 6,
+    TIMER_MICRO_BREAK = 7
 } TimerMode;
 
 typedef enum {
@@ -353,7 +363,7 @@ typedef struct {
 
 // Global variables
 TimerSettings settings = {90, 2, 45, 5, 15, 10, 5, 10, 0, 1, 1, 1, 0, 1, 1,
-    {0x7F8C98, 0x829889, 0x8C86A3, 0xA39182, 0xC79A52, 0xC4B8A8}};
+    {0x7F8C98, 0x829889, 0x8C86A3, 0xA39182, 0xC79A52, 0xC4B8A8, 0x829889}};
 int pomodoro_count = 0;
 int is_running = 0;
 int is_paused = 0;
@@ -370,7 +380,22 @@ IdleMode idle_mode = IDLE_POMODORO;
 int idle_pomodoro_is_long = 1;
 int idle_break_is_long = 0;
 NOTIFYICONDATA nid = {0};
-HANDLE timer_thread_handle = NULL;
+/* All timer state is owned by the main window thread, including modal loops. */
+static ULONGLONG timer_last_tick;
+static UINT_PTR timer_clock_id;
+static unsigned timer_stage_generation;
+static unsigned toast_stage_generation;
+static TimerMode completed_pending_mode = TIMER_NONE;
+typedef enum { MICRO_NONE, MICRO_WAIT_START, MICRO_ACTIVE, MICRO_WAIT_RESUME } MicroPhase;
+static struct {
+    MicroPhase phase;
+    TimerMode source;
+    int base_seconds, extension_seconds, interval_seconds, duration_seconds;
+    int frozen_seconds;
+    int *triggered;
+    int triggered_count, triggered_capacity;
+} micro;
+static struct { int valid, overtime, count, long_count; } session_rules;
 int autostart_enabled = 0;
 static HICON last_icon = NULL;
 static wchar_t last_text[16] = {0};
@@ -458,7 +483,6 @@ void ShowSettingsDialog(HWND hwndParent);
 void ShowAboutDialog(HWND hwndParent);
 void ShowCompletionNotification(HWND hwnd, int completed_mode);
 void start_timer(HWND hwnd, int duration_minutes, TimerMode mode);
-DWORD WINAPI timer_thread(LPVOID lpParam);
 int record_completed_pomodoros(int completedCount);
 void generate_and_open_report(HWND hwnd);
 void RegisterHeatmapWindowClass(void);
@@ -493,6 +517,23 @@ static TimerMode get_default_pomodoro_mode(void);
 static TimerMode get_default_break_mode(void);
 
 static void close_toast_notification_if_open(void);
+static void clear_micro_state(void);
+static int timer_session_active(void);
+static int timer_can_edit_time(void);
+static int timer_setting_locked(int command);
+static void timer_sync_clock(HWND hwnd);
+static void timer_advance_seconds(HWND hwnd, int elapsed);
+static void timer_primary_action(HWND hwnd);
+static void timer_stop_action(HWND hwnd);
+static void timer_refresh_toast(void);
+static TimerMode timer_next_mode(TimerMode source);
+static void timer_select_idle(void);
+static int timer_effective_count(void);
+static int timer_effective_overtime(void);
+static void load_settings_preserving_runtime(void);
+static void timer_apply_live_preferences(void);
+static int timer_correct_today_count(HWND hwnd, int count);
+#include "timer_ui.h"
 
 static UINT app_get_monitor_dpi(HMONITOR hMon) {
     typedef HRESULT (WINAPI *GetDpiForMonitorFn)(HMONITOR, int, UINT*, UINT*);
@@ -662,6 +703,9 @@ static int resolve_data_dir_for_mode(DataLocationMode mode, const wchar_t* custo
 }
 
 static int save_data_location_to_registry(void) {
+#ifdef POMODORO_TEST_IO
+    return 1; /* Integration fixtures never write the user registry. */
+#else
     HKEY hKey;
     LONG modeResult;
     LONG pathResult;
@@ -673,6 +717,7 @@ static int save_data_location_to_registry(void) {
         return modeResult == ERROR_SUCCESS && pathResult == ERROR_SUCCESS;
     }
     return 0;
+#endif
 }
 
 static void load_data_location_from_registry(void) {
@@ -855,6 +900,13 @@ static int delete_data_files_in_directory(const wchar_t* dir) {
 }
 
 static int choose_folder_dialog(HWND owner, const wchar_t* title, wchar_t* outPath, size_t outChars) {
+#ifdef POMODORO_TEST_IO
+    if (test_io_active) {
+        size_t length = wcslen(test_io_root);
+        if (wcsncmp(test_io_folder, test_io_root, length) || test_io_folder[length] != L'\\' || wcsstr(test_io_folder,L"..")) return 0;
+        wcsncpy(outPath,test_io_folder,outChars-1);outPath[outChars-1]=0;return 1;
+    }
+#endif
     BROWSEINFOW bi = {0};
     LPITEMIDLIST pidl;
     int ok;
@@ -880,8 +932,8 @@ static int switch_data_location(HWND hwnd, DataLocationMode mode, const wchar_t*
     int expected = 0;
     int copiedForSwitch = 0;
 
-    if (is_running || is_paused) {
-        MessageBoxW(hwnd, L"计时进行中，无法切换数据位置。", L"提示", MB_OK | MB_ICONINFORMATION);
+    if (is_running) {
+        MessageBoxW(hwnd, L"请暂停计时后切换数据位置。", L"提示", MB_OK | MB_ICONINFORMATION);
         return 0;
     }
 
@@ -889,6 +941,8 @@ static int switch_data_location(HWND hwnd, DataLocationMode mode, const wchar_t*
         MessageBoxW(hwnd, L"目标数据位置不可用。", L"错误", MB_OK | MB_ICONERROR);
         return 0;
     }
+
+    if (mode == g_data_location_mode && _wcsicmp(targetDir, g_data_dir) == 0) return 1;
 
     wcsncpy(prevDir, g_data_dir, MAX_PATH - 1);
     prevDir[MAX_PATH - 1] = L'\0';
@@ -945,7 +999,7 @@ static int switch_data_location(HWND hwnd, DataLocationMode mode, const wchar_t*
     }
     build_data_file_paths();
     repair_settings_recovery_chain();
-    load_settings();
+    load_settings_preserving_runtime();
     pomodoro_count = get_today_count_from_storage();
     refresh_today_count_if_day_changed(hwnd, 1);
     load_heatmap_data();
@@ -986,12 +1040,8 @@ static int export_data_to_folder(HWND hwnd) {
     int copied = 0;
     int failed = 0;
 
-    if (is_running || is_paused) {
-        MessageBoxW(hwnd, L"计时进行中，无法导出数据。", L"提示", MB_OK | MB_ICONINFORMATION);
-        return 0;
-    }
-
     if (!choose_folder_dialog(hwnd, L"选择导出目录", outDir, MAX_PATH)) return 0;
+    timer_sync_clock(hwnd);
 
     join_path(dst, MAX_PATH, outDir, L"pomodoro_settings.json");
     attr = GetFileAttributesW(g_settings_path);
@@ -1095,12 +1145,13 @@ static int import_data_from_folder(HWND hwnd) {
     int okMain;
     int okArchive;
 
-    if (is_running || is_paused) {
-        MessageBoxW(hwnd, L"计时进行中，无法导入数据。", L"提示", MB_OK | MB_ICONINFORMATION);
+    if (is_running) {
+        MessageBoxW(hwnd, L"请暂停计时后导入数据。", L"提示", MB_OK | MB_ICONINFORMATION);
         return 0;
     }
 
     if (!choose_folder_dialog(hwnd, L"选择导入目录", inDir, MAX_PATH)) return 0;
+    if (is_running) { MessageBoxW(hwnd, L"计时已继续，请暂停后再导入。", L"提示", MB_OK | MB_ICONINFORMATION); return 0; }
     if (_wcsicmp(inDir, g_data_dir) == 0) {
         MessageBoxW(hwnd, L"不能从当前正在使用的数据目录导入。", L"提示", MB_OK | MB_ICONINFORMATION);
         return 0;
@@ -1116,6 +1167,7 @@ static int import_data_from_folder(HWND hwnd) {
     }
 
     ensure_directory_exists(g_data_dir);
+    if (is_running) { MessageBoxW(hwnd,L"计时已继续，请暂停后再导入。",L"提示",MB_OK|MB_ICONINFORMATION); return 0; }
     now = time(NULL);
     tmNow = localtime(&now);
     if (tmNow) {
@@ -1164,7 +1216,7 @@ static int import_data_from_folder(HWND hwnd) {
     }
 
     repair_settings_recovery_chain();
-    load_settings();
+    load_settings_preserving_runtime();
     pomodoro_count = get_today_count_from_storage();
     refresh_today_count_if_day_changed(hwnd, 1);
     load_heatmap_data();
@@ -1273,6 +1325,9 @@ static void reset_defaults_keep_data(void) {
     settings.default_pomodoro_is_long = 1;
     settings.default_break_is_long = 0;
     settings.enable_overtime_count_up = 1;
+    settings.enable_micro_break = 0;
+    settings.micro_break_interval_minutes = 15;
+    settings.micro_break_duration_minutes = 1;
     settings.enable_pomodoro_count = 1;
     memcpy(settings.fullscreen_colors, fs_default_colors, sizeof(fs_default_colors));
     memcpy(settings.fullscreen_scales, fs_default_scales, sizeof(fs_default_scales));
@@ -1285,13 +1340,6 @@ static void reset_defaults_keep_data(void) {
     settings.fullscreen_show_mouse_tips = 1;
     settings.fullscreen_signature[0] = 0;
 
-    if (!is_running && !is_paused) {
-        if (idle_mode == IDLE_POMODORO) {
-            idle_pomodoro_is_long = settings.default_pomodoro_is_long;
-        } else if (idle_mode == IDLE_BREAK) {
-            idle_break_is_long = settings.default_break_is_long;
-        }
-    }
 }
 
 // Initialize system metrics for dialog positioning
@@ -1435,7 +1483,7 @@ void RefreshMenuText(void) {
 
 // Create dynamic tray icon with text and dots
 HICON create_tray_icon(const wchar_t* text, int dots) {
-    int visible_dots = settings.enable_pomodoro_count ? get_visible_dots(dots) : 0;
+    int visible_dots = timer_effective_count() ? get_visible_dots(dots) : 0;
     HDC hdc = NULL;
     HDC hdcMask = NULL;
     HBITMAP hBitmap = NULL;
@@ -1585,41 +1633,10 @@ cleanup:
 void update_tray_icon(HWND hwnd, const wchar_t* text, int dots, int seconds) {
     wchar_t tooltip[128];
     (void)hwnd;
-    if ((is_running || is_paused) && (current_timer_mode != TIMER_NONE || is_overtime)) {
-        int min = seconds / 60, sec = seconds % 60;
-        const wchar_t* pause_suffix = is_paused ? L" (已暂停)" : L"";
-        if (is_overtime) {
-            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"超时正计时 +%02d:%02d%s", min, sec, pause_suffix);
-        } else if (is_count_up_timer) {
-            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"正计时 %02d:%02d%s", min, sec, pause_suffix);
-        } else if (current_timer_mode == TIMER_SHORT_POMODORO) {
-            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"短番茄钟 %02d:%02d%s", min, sec, pause_suffix);
-        } else if (current_timer_mode == TIMER_LONG_POMODORO) {
-            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"长番茄钟 %02d:%02d%s", min, sec, pause_suffix);
-        } else if (current_timer_mode == TIMER_SHORT_BREAK) {
-            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"短休息 %02d:%02d%s", min, sec, pause_suffix);
-        } else if (current_timer_mode == TIMER_LONG_BREAK) {
-            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"长休息 %02d:%02d%s", min, sec, pause_suffix);
-        } else if (current_timer_mode == TIMER_CUSTOM) {
-            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"自定义计时 %02d:%02d%s", min, sec, pause_suffix);
-        } else {
-            swprintf(tooltip, sizeof(tooltip)/sizeof(tooltip[0]), L"%02d:%02d%s", min, sec, pause_suffix);
-        }
-    } else {
-        if (idle_mode == IDLE_BREAK) {
-            wcsncpy(tooltip, idle_break_is_long ? L"点击开始长休息" : L"点击开始短休息", sizeof(tooltip)/sizeof(tooltip[0]) - 1);
-            tooltip[sizeof(tooltip)/sizeof(tooltip[0]) - 1] = L'\0';
-        } else if (idle_mode == IDLE_COUNT_UP) {
-            wcsncpy(tooltip, L"点击开始正计时", sizeof(tooltip)/sizeof(tooltip[0]) - 1);
-            tooltip[sizeof(tooltip)/sizeof(tooltip[0]) - 1] = L'\0';
-        } else if (idle_mode == IDLE_CUSTOM) {
-            wcsncpy(tooltip, L"点击开始自定义计时", sizeof(tooltip)/sizeof(tooltip[0]) - 1);
-            tooltip[sizeof(tooltip)/sizeof(tooltip[0]) - 1] = L'\0';
-        } else {
-            wcsncpy(tooltip, idle_pomodoro_is_long ? L"点击开始长番茄钟" : L"点击开始短番茄钟", sizeof(tooltip)/sizeof(tooltip[0]) - 1);
-            tooltip[sizeof(tooltip)/sizeof(tooltip[0]) - 1] = L'\0';
-        }
-    }
+    FullscreenView view;
+    fs_read_timer_view(&view);
+    swprintf(tooltip, 128, L"%ls %ls", view.status, view.time);
+    (void)seconds;
     wcsncpy(nid.szTip, tooltip, sizeof(nid.szTip)/sizeof(nid.szTip[0]) - 1);
     nid.szTip[sizeof(nid.szTip)/sizeof(nid.szTip[0]) - 1] = L'\0';
 
@@ -1651,7 +1668,7 @@ static void stop_clock_loop_sound(void) {
 }
 
 static void start_clock_loop_sound(void) {
-    if (g_clock_loop_playing || !settings.enable_clock_sound) return;
+    if (g_clock_loop_playing || !settings.enable_clock_sound || !is_running || is_overtime) return;
 
     if (!play_resource_sound_ex("CLOCK_WAV", SND_ASYNC | SND_LOOP)) {
         if (PlaySoundW(L"clock.wav", NULL, SND_FILENAME | SND_ASYNC | SND_LOOP)) {
@@ -1662,28 +1679,21 @@ static void start_clock_loop_sound(void) {
     }
 }
 
-static void stop_timer_thread_if_needed(void) {
-    if (is_running) {
-        is_running = 0;
-    }
-    if (timer_thread_handle != NULL) {
-        WaitForSingleObject(timer_thread_handle, INFINITE);
-        CloseHandle(timer_thread_handle);
-        timer_thread_handle = NULL;
-    }
+static void stop_timer_clock(void) {
+    if (timer_clock_id) KillTimer(g_main_hwnd, ID_TIMER_CLOCK);
+    timer_clock_id = 0;
+    is_running = 0;
+    stop_clock_loop_sound();
 }
 
-static int launch_timer_thread(HWND hwnd) {
-    timer_thread_handle = CreateThread(NULL, 0, timer_thread, hwnd, 0, NULL);
-    if (timer_thread_handle) return 1;
-
+static int launch_timer_clock(HWND hwnd) {
+    timer_last_tick = GetTickCount64();
+    timer_clock_id = SetTimer(hwnd, ID_TIMER_CLOCK, 50, NULL);
+    if (timer_clock_id) { start_clock_loop_sound(); return 1; }
     is_running = 0;
-    is_paused = 0;
-    remaining_seconds = 0;
-    current_timer_mode = TIMER_NONE;
-    clear_count_up_state();
+    is_paused = 1; /* Retain the real time and frozen context for a retry. */
     stop_clock_loop_sound();
-    MessageBoxW(hwnd, L"无法创建计时线程，计时未启动。", L"启动失败", MB_OK | MB_ICONERROR);
+    MessageBoxW(hwnd, L"无法启动计时，时间已保留。", L"启动失败", MB_OK | MB_ICONERROR);
     return 0;
 }
 
@@ -1730,7 +1740,7 @@ static void credit_count_up_thresholds(HWND hwnd) {
     int delta;
     int targetCount;
 
-    if (!settings.enable_pomodoro_count) return;
+    if (!timer_effective_count()) return;
     if (!is_count_up_timer || current_timer_mode != TIMER_COUNT_UP || count_up_threshold_seconds <= 0) return;
     reached = remaining_seconds / count_up_threshold_seconds;
     if (reached <= count_up_credited) return;
@@ -1772,7 +1782,7 @@ static void set_idle_mode_after_manual_stop(void) {
 }
 
 static void refresh_timer_icon_by_state(HWND hwnd) {
-    if (is_running || is_paused) {
+    if (!timer_ui_is_ready()) {
         wchar_t display_text[16];
         if (is_overtime) {
             if (overtime_seconds < 60) {
@@ -1792,11 +1802,12 @@ static void refresh_timer_icon_by_state(HWND hwnd) {
     } else {
         update_tray_icon(hwnd, L"\u25BA", pomodoro_count, 0);
     }
+    timer_refresh_toast();
 }
 
 static void start_mode_from_menu(HWND hwnd, TimerMode mode) {
-    if (is_running || is_paused) {
-        stop_timer_thread_if_needed();
+    if (timer_session_active()) {
+        stop_timer_clock();
         is_paused = 0;
         current_timer_mode = TIMER_NONE;
         remaining_seconds = 0;
@@ -1848,6 +1859,8 @@ static void start_current_idle_mode(HWND hwnd) {
     }
 }
 
+#include "timer_state.h"
+
 // Play sound from resource
 void play_resource_sound(const char* resourceName) {
     const wchar_t* fallbackPath = strcmp(resourceName, "CLOCK_WAV") == 0 ? L"clock.wav" : L"ding.wav";
@@ -1856,162 +1869,15 @@ void play_resource_sound(const char* resourceName) {
     }
 }
 
-// Timer thread function
-DWORD WINAPI timer_thread(LPVOID lpParam) {
-    start_clock_loop_sound();
-
-    ULONGLONG last_tick = GetTickCount64();
-    int last_shown_seconds = -1;
-    HWND hwnd = (HWND)lpParam;
-
-    while (is_running) {
-        ULONGLONG now = GetTickCount64();
-        ULONGLONG elapsed_ms = now - last_tick;
-
-        if (elapsed_ms >= 1000) {
-            int elapsed_sec = (int)(elapsed_ms / 1000);
-            if (is_overtime) {
-                if (overtime_seconds <= 2147483647 - elapsed_sec) {
-                    overtime_seconds += elapsed_sec;
-                }
-            } else if (is_count_up_timer) {
-                if (remaining_seconds <= 2147483647 - elapsed_sec) {
-                    remaining_seconds += elapsed_sec;
-                }
-            } else {
-                remaining_seconds -= elapsed_sec;
-            }
-            last_tick += (ULONGLONG)elapsed_sec * 1000;
-
-            if (!is_count_up_timer && !is_overtime && remaining_seconds < 0) remaining_seconds = 0;
-
-            if (!is_count_up_timer && !is_overtime && remaining_seconds > 0 && remaining_seconds <= 10 && settings.enable_clock_sound) {
-                Beep(440, 100);
-            }
-
-            if (is_count_up_timer && !is_overtime) credit_count_up_thresholds(hwnd);
-
-            if (is_overtime) {
-                if (overtime_seconds != last_shown_seconds) {
-                    wchar_t display_text[16];
-                    if (overtime_seconds < 60) {
-                        swprintf(display_text, sizeof(display_text)/sizeof(display_text[0]), L"+%d", overtime_seconds);
-                    } else {
-                        swprintf(display_text, sizeof(display_text)/sizeof(display_text[0]), L"+%d", overtime_seconds / 60);
-                    }
-                    update_tray_icon(hwnd, display_text, pomodoro_count, overtime_seconds);
-                    last_shown_seconds = overtime_seconds;
-                }
-            } else {
-                if (remaining_seconds != last_shown_seconds) {
-                    wchar_t display_text[16];
-                    if (remaining_seconds < 60) {
-                        _itow(remaining_seconds, display_text, 10);
-                    } else {
-                        _itow(remaining_seconds / 60, display_text, 10);
-                    }
-                    update_tray_icon(hwnd, display_text, pomodoro_count, remaining_seconds);
-                    last_shown_seconds = remaining_seconds;
-                }
-            }
-        }
-
-        if (!is_count_up_timer && !is_overtime && remaining_seconds <= 0) {
-            stop_clock_loop_sound();
-
-            int completed_mode = (int)current_timer_mode;
-            LONG completed_fs_session = InterlockedCompareExchange(&fs_session, 0, 0);
-
-            if (is_pomodoro_mode(current_timer_mode)) {
-                if (settings.enable_pomodoro_count) {
-                    int completedCount = current_timer_mode == TIMER_LONG_POMODORO ? settings.long_pomodoro_count : 1;
-                    if (record_completed_pomodoros(completedCount)) {
-                        pomodoro_count = get_today_count_from_storage();
-                    } else {
-                        pomodoro_count = clamp_int(get_today_count_from_storage() + completedCount, 0, 9999);
-                        if (!sync_today_count_to_target(pomodoro_count)) {
-                            OutputDebugStringA("Failed to persist completion to both log and adjustment files.\n");
-                        }
-                    }
-                }
-            }
-
-            if (is_pomodoro_mode((TimerMode)completed_mode)) {
-                idle_mode = IDLE_BREAK;
-                idle_break_is_long = settings.default_break_is_long;
-            } else if (completed_mode == TIMER_SHORT_BREAK || completed_mode == TIMER_LONG_BREAK) {
-                idle_mode = IDLE_POMODORO;
-                idle_pomodoro_is_long = settings.default_pomodoro_is_long;
-                idle_break_is_long = 0;
-            } else if (completed_mode == TIMER_CUSTOM) {
-                idle_mode = IDLE_CUSTOM;
-            }
-
-            if (settings.enable_overtime_count_up) {
-                is_overtime = 1;
-                overtime_seconds = 0;
-                overtime_source_mode = (TimerMode)completed_mode;
-                current_timer_mode = TIMER_NONE;
-                clear_count_up_state();
-                save_settings();
-
-                if (settings.enable_completion_sound) {
-                    play_resource_sound("DING_WAV");
-                }
-
-                if (settings.show_completion_dialog) {
-                    PostMessage(hwnd, WM_TOAST_NOTIFY, (WPARAM)completed_mode, 0);
-                }
-
-                wchar_t display_text[16] = L"+0";
-                update_tray_icon(hwnd, display_text, pomodoro_count, 0);
-                last_shown_seconds = 0;
-                last_tick = GetTickCount64();
-                continue;
-            }
-
-            is_running = 0;
-            is_paused = 0;
-
-            current_timer_mode = TIMER_NONE;
-            clear_count_up_state();
-            clear_overtime_state();
-            save_settings();
-
-            PostMessageW(hwnd, WM_FS_COMPLETED, (WPARAM)completed_mode, (LPARAM)completed_fs_session);
-            update_tray_icon(hwnd, L"\u25BA", pomodoro_count, 0);
-            if (settings.enable_completion_sound) {
-                play_resource_sound("DING_WAV");
-            }
-
-            // Post a message to the main thread to show completion notification (create toast on GUI thread)
-            if (settings.show_completion_dialog) {
-                PostMessage(hwnd, WM_TOAST_NOTIFY, (WPARAM)completed_mode, 0);
-            }
-
-            return 0;
-        }
-
-        ULONGLONG next_boundary = last_tick + 1000;
-        now = GetTickCount64();
-        long sleep_ms = (long)(next_boundary - now);
-
-        if (sleep_ms < 1) sleep_ms = 1;
-        if (sleep_ms > 50) sleep_ms = 50;
-
-        Sleep(sleep_ms);
-    }
-
-    stop_clock_loop_sound();
-
-    return 0;
-}
-
 // Start timer with specified duration
 void start_timer(HWND hwnd, int duration_minutes, TimerMode mode) {
     fs_completed_mode = TIMER_NONE;
+    ++timer_stage_generation;
+    completed_pending_mode = TIMER_NONE;
+    close_toast_notification_if_open();
+    clear_micro_state();
     InterlockedIncrement(&fs_session);
-    stop_timer_thread_if_needed();
+    stop_timer_clock();
     clear_overtime_state();
 
     is_count_up_timer = mode == TIMER_COUNT_UP;
@@ -2021,7 +1887,17 @@ void start_timer(HWND hwnd, int duration_minutes, TimerMode mode) {
     is_running = 1;
     is_paused = 0;
     current_timer_mode = mode;
-    launch_timer_thread(hwnd);
+    session_rules.valid = 1;
+    session_rules.overtime = settings.enable_overtime_count_up;
+    session_rules.count = settings.enable_pomodoro_count;
+    session_rules.long_count = settings.long_pomodoro_count;
+    if (is_pomodoro_mode(mode) && settings.enable_micro_break) {
+        micro.source = mode;
+        micro.base_seconds = remaining_seconds;
+        micro.interval_seconds = settings.micro_break_interval_minutes * 60;
+        micro.duration_seconds = settings.micro_break_duration_minutes * 60;
+    }
+    launch_timer_clock(hwnd);
 }
 
 // Check if autostart is enabled in registry
@@ -2205,7 +2081,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v2.5.31");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v3.0.0");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -2360,20 +2236,11 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         case WM_COMMAND:
             if (LOWORD(wParam) == ID_TOAST_ACTION && HIWORD(wParam) == BN_CLICKED) {
-                // Button clicked: start the appropriate timer on the main window
-                if (is_pomodoro_mode((TimerMode)toast_completed_mode)) {
-                    idle_mode = IDLE_BREAK;
-                    idle_break_is_long = settings.default_break_is_long;
-                    start_mode_from_menu(g_main_hwnd, get_default_break_mode());
-                } else if (toast_completed_mode == TIMER_CUSTOM) {
-                    idle_mode = IDLE_CUSTOM;
-                    start_mode_from_menu(g_main_hwnd, TIMER_CUSTOM);
-                } else {
-                    idle_mode = IDLE_POMODORO;
-                    idle_pomodoro_is_long = settings.default_pomodoro_is_long;
-                    start_mode_from_menu(g_main_hwnd, get_default_pomodoro_mode());
+                if (toast_stage_generation == timer_stage_generation) {
+                    timer_sync_clock(g_main_hwnd);
+                    if (toast_stage_generation == timer_stage_generation) timer_primary_action(g_main_hwnd);
                 }
-                 DestroyWindow(hwnd);
+                if (IsWindow(hwnd)) DestroyWindow(hwnd);
              } else if (LOWORD(wParam) == ID_TOAST_CLOSE && HIWORD(wParam) == BN_CLICKED) {
                  // Close button clicked
                  DestroyWindow(hwnd);
@@ -2514,7 +2381,7 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 SelectObject(hdc, hOldFont);
                 DeleteObject(hFont);
             } else {
-                if (settings.enable_pomodoro_count) {
+                if (timer_effective_count()) {
                     // Draw progress dots (4) above the action button
                     int totalDots = 4;
                     int dotR = toast_scale(6, dpi); // radius
@@ -2593,18 +2460,9 @@ void RegisterToastWindowClass(void) {
 
 // Show completion notification as toast
 void ShowCompletionNotification(HWND hwnd, int completed_mode) {
-    const wchar_t* message;
+    wchar_t message[96];
     (void)hwnd;
-
-    if (is_pomodoro_mode((TimerMode)completed_mode)) {
-        message = g_lang->notify_pomodoro_complete;
-    } else if (completed_mode == TIMER_LONG_BREAK) {
-        message = g_lang->notify_long_break_complete;
-    } else if (completed_mode == TIMER_CUSTOM) {
-        message = L"自定义计时完成!";
-    } else {
-        message = g_lang->notify_break_complete;
-    }
+    timer_ui_notification(message, 96, (TimerMode)completed_mode);
 
     // Close previous toast if exists
     if (g_hToastWnd) {
@@ -2653,7 +2511,7 @@ void ShowCompletionNotification(HWND hwnd, int completed_mode) {
     // Create toast window with message in window title (for debugging)
     // Store message pointer for use in WM_PAINT
     static wchar_t toastMessage[256] = {0};
-    if (settings.enable_pomodoro_count) {
+    if (timer_effective_count()) {
         swprintf(toastMessage, 256, L"%ls\n今日累计: %d", message, pomodoro_count);
     } else {
         swprintf(toastMessage, 256, L"%ls", message);
@@ -2674,18 +2532,12 @@ void ShowCompletionNotification(HWND hwnd, int completed_mode) {
         toast_is_pomodoro = is_pomodoro_mode((TimerMode)completed_mode);
         toast_is_long_break = (completed_mode == TIMER_LONG_BREAK);
         toast_completed_mode = completed_mode;
+        toast_stage_generation = timer_stage_generation;
 
         // Store message in window user data for access in WM_PAINT
         SetWindowLongPtrW(g_hToastWnd, GWLP_USERDATA, (LONG_PTR)toastMessage);
 
-        const wchar_t* btnText;
-        if (is_pomodoro_mode((TimerMode)completed_mode)) {
-            btnText = settings.default_break_is_long ? L"开始长休息" : L"开始短休息";
-        } else if (completed_mode == TIMER_CUSTOM) {
-            btnText = L"继续自定义";
-        } else {
-            btnText = settings.default_pomodoro_is_long ? L"开始长番茄钟" : L"开始短番茄钟";
-        }
+        const wchar_t* btnText = L"开始";
 
         g_hToastButton = CreateWindowW(L"BUTTON", btnText,
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -2705,6 +2557,7 @@ void ShowCompletionNotification(HWND hwnd, int completed_mode) {
         // Layout all children and apply DPI scaled font
         toast_layout_children(g_hToastWnd, dpi);
         SetWindowTextW(g_hToastButton, btnText);
+        timer_refresh_toast();
 
         // Force repaint to update dots and button
         InvalidateRect(g_hToastWnd, NULL, TRUE);
@@ -3351,6 +3204,7 @@ void generate_and_open_report(HWND hwnd) {
 
 // Main window procedure
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_USER + 1) timer_sync_clock(hwnd);
     if (g_taskbar_created_message && msg == g_taskbar_created_message) {
         td_cancel();
         if (!Shell_NotifyIconW(NIM_MODIFY, &nid)) {
@@ -3367,35 +3221,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_USER + 1: // Tray icon message
             if (wParam == nid.uID && wParam != 0 && td_tray_message(LOWORD(lParam))) return 0;
             if (LOWORD(lParam) == WM_LBUTTONUP) {
-                // Left click: resume if paused, stop if running, otherwise start current idle mode.
-                if (is_paused) {
-                    if ((remaining_seconds > 0 || is_overtime) && (current_timer_mode != TIMER_NONE || is_overtime)) {
-                        is_paused = 0;
-                        is_running = 1;
-                        launch_timer_thread(hwnd);
-                    } else {
-                        // Broken pause state fallback: clear pause and return to idle safely.
-                        is_paused = 0;
-                        is_running = 0;
-                        current_timer_mode = TIMER_NONE;
-                        remaining_seconds = 0;
-                        clear_count_up_state();
-                        clear_overtime_state();
-                    }
-                    refresh_timer_icon_by_state(hwnd);
-                } else if (is_running) {
-                    stop_timer_thread_if_needed();
-                    is_paused = 0;
-                    set_idle_mode_after_manual_stop();
-                    current_timer_mode = TIMER_NONE;
-                    remaining_seconds = 0;
-                    clear_count_up_state();
-                    clear_overtime_state();
-                    save_settings();
-                    refresh_timer_icon_by_state(hwnd);
-                } else {
-                    start_current_idle_mode(hwnd);
-                }
+                timer_primary_action(hwnd);
             } else if (LOWORD(lParam) == WM_MBUTTONUP) {
                 fs_show_all();
             } else if (LOWORD(lParam) == WM_RBUTTONUP) {
@@ -3411,13 +3237,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 HMENU hColorMenu = fs_create_color_menu();
                 HMENU hDataStoreMenu = CreatePopupMenu();
                 HMENU hIdleMenu = CreatePopupMenu();
-                UINT idleAvailability = (is_running || is_paused) ? MF_GRAYED : MF_ENABLED;
+                UINT idleAvailability = MF_ENABLED;
                 g_hMenu = hMenu; // Store menu handle for language updates
 
-                AppendMenu(hControlMenu, MF_STRING | ((is_running || is_paused) ? MF_GRAYED : MF_ENABLED), ID_MENU_START_CURRENT, L"开始");
-                AppendMenu(hControlMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_PAUSE_RESUME,
-                    is_running ? L"暂停" : L"继续");
-                AppendMenu(hControlMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_STOP, L"结束");
+                AppendMenu(hControlMenu, MF_STRING | (timer_ui_can_start() ? MF_ENABLED : MF_GRAYED), ID_MENU_START_CURRENT, L"开始");
+                AppendMenu(hControlMenu, MF_STRING | (timer_ui_can_pause() ? MF_ENABLED : MF_GRAYED), ID_MENU_PAUSE_RESUME, timer_ui_pause_label());
+                AppendMenu(hControlMenu, MF_STRING | (timer_ui_can_end() ? MF_ENABLED : MF_GRAYED), ID_MENU_STOP, L"结束");
 
                 AppendMenu(hStartMenu, MF_STRING, 1, L"开始长番茄钟");
                 AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_SHORT_POMODORO, L"开始短番茄钟");
@@ -3426,30 +3251,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_COUNT_UP, L"开始正计时");
                 AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_CUSTOM, L"开始自定义计时");
 
-                AppendMenu(hAdjustMenu, MF_STRING, ID_MENU_SET_TIME,
+                AppendMenu(hAdjustMenu, MF_STRING | (timer_can_edit_time() ? MF_ENABLED : MF_GRAYED), ID_MENU_SET_TIME,
                     ((is_running || is_paused) && is_overtime) ? L"修改已超时时间(分钟)" :
                     (((is_running || is_paused) && is_count_up_timer) ? L"修改已计时时间(分钟)" : L"修改当前剩余时间(分钟)"));
-                AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_PLUS_5_MIN, L"增加步进时间");
-                AppendMenu(hAdjustMenu, MF_STRING | ((is_running || is_paused) ? MF_ENABLED : MF_GRAYED), ID_MENU_MINUS_5_MIN, L"减少步进时间");
+                AppendMenu(hAdjustMenu, MF_STRING | (timer_can_edit_time() ? MF_ENABLED : MF_GRAYED), ID_MENU_PLUS_5_MIN, L"增加步进时间");
+                AppendMenu(hAdjustMenu, MF_STRING | (timer_can_edit_time() ? MF_ENABLED : MF_GRAYED), ID_MENU_MINUS_5_MIN, L"减少步进时间");
                 AppendMenu(hAdjustMenu, MF_SEPARATOR, 0, NULL);
-                UINT countAdjustAvailability = (is_running || is_paused || !settings.enable_pomodoro_count) ? MF_GRAYED : MF_ENABLED;
+                UINT countAdjustAvailability = MF_ENABLED;
                 AppendMenu(hAdjustMenu, MF_STRING | countAdjustAvailability, ID_MENU_SET_COUNT, L"修改今日番茄数");
                 AppendMenu(hAdjustMenu, MF_STRING | countAdjustAvailability, ID_MENU_RESET_COUNT, L"番茄计数清零");
-                AppendMenu(hAdjustMenu, MF_STRING | countAdjustAvailability, ID_MENU_SET_LONG_POMODORO_COUNT, L"长番茄钟番茄钟数");
+                AppendMenu(hAdjustMenu, MF_STRING, ID_MENU_SET_LONG_POMODORO_COUNT, L"长番茄钟番茄钟数");
 
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_POMODORO_DURATION, L"长番茄钟时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_SHORT_POMODORO_DURATION, L"短番茄钟时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_SHORT_BREAK_DURATION, L"短休息时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_LONG_BREAK_DURATION, L"长休息时长(分钟)");
+                AppendMenu(hDurationMenu, MF_STRING | (timer_setting_locked(ID_MENU_MICRO_INTERVAL) ? MF_GRAYED : 0), ID_MENU_MICRO_INTERVAL, L"微休息间隔(分钟)");
+                AppendMenu(hDurationMenu, MF_STRING | (timer_setting_locked(ID_MENU_MICRO_DURATION) ? MF_GRAYED : 0), ID_MENU_MICRO_DURATION, L"微休息时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_CUSTOM_DURATION, L"自定义时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_TIME_BLOCK, L"步进时间(分钟)");
-                AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_TOAST_COLLAPSE_SECONDS, L"弹窗自动折叠(秒)");
+                AppendMenu(hDurationMenu, MF_STRING | (settings.show_completion_dialog ? 0 : MF_GRAYED), ID_MENU_SET_TOAST_COLLAPSE_SECONDS, L"弹窗自动折叠(秒)");
 
                 AppendMenu(hOptionMenu, MF_STRING | (settings.enable_clock_sound ? MF_CHECKED : 0), 4, L"时钟音效");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.enable_completion_sound ? MF_CHECKED : 0), ID_MENU_COMPLETION_SOUND, L"完成声音");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.show_completion_dialog ? MF_CHECKED : 0), 9, L"完成后弹窗");
-                AppendMenu(hOptionMenu, MF_STRING | (settings.enable_pomodoro_count ? MF_CHECKED : 0), ID_MENU_ENABLE_POMODORO_COUNT, L"番茄钟计数");
-                AppendMenu(hOptionMenu, MF_STRING | (settings.enable_overtime_count_up ? MF_CHECKED : 0), ID_MENU_ENABLE_OVERTIME, L"超时正计时");
+                AppendMenu(hOptionMenu, MF_STRING | (timer_setting_locked(ID_MENU_ENABLE_MICRO_BREAK) ? MF_GRAYED : 0) | (settings.enable_micro_break ? MF_CHECKED : 0), ID_MENU_ENABLE_MICRO_BREAK, L"微休息");
+                AppendMenu(hOptionMenu, MF_STRING | (timer_setting_locked(ID_MENU_ENABLE_POMODORO_COUNT) ? MF_GRAYED : 0) | (settings.enable_pomodoro_count ? MF_CHECKED : 0), ID_MENU_ENABLE_POMODORO_COUNT, L"番茄钟计数");
+                AppendMenu(hOptionMenu, MF_STRING | (timer_setting_locked(ID_MENU_ENABLE_OVERTIME) ? MF_GRAYED : 0) | (settings.enable_overtime_count_up ? MF_CHECKED : 0), ID_MENU_ENABLE_OVERTIME, L"超时正计时");
                 AppendMenu(hOptionMenu, MF_STRING | (autostart_enabled ? MF_CHECKED : 0), 5, L"开机启动");
                 AppendMenu(hOptionMenu, MF_SEPARATOR, 0, NULL);
                 AppendMenu(hOptionMenu, MF_STRING | (settings.default_pomodoro_is_long ? MF_CHECKED : 0), ID_MENU_DEFAULT_LONG_POMODORO, L"默认：长番茄钟");
@@ -3457,20 +3285,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hOptionMenu, MF_STRING | (!settings.default_break_is_long ? MF_CHECKED : 0), ID_MENU_DEFAULT_SHORT_BREAK, L"默认：短休息");
                 AppendMenu(hOptionMenu, MF_STRING | (settings.default_break_is_long ? MF_CHECKED : 0), ID_MENU_DEFAULT_LONG_BREAK, L"默认：长休息");
 
-                AppendMenu(hDataOpsMenu, MF_STRING, ID_MENU_IMPORT_DATA, L"导入数据");
+                AppendMenu(hDataOpsMenu, MF_STRING | (timer_setting_locked(ID_MENU_IMPORT_DATA) ? MF_GRAYED : 0), ID_MENU_IMPORT_DATA, L"导入数据");
                 AppendMenu(hDataOpsMenu, MF_STRING, ID_MENU_EXPORT_DATA, L"导出数据");
                 AppendMenu(hDataOpsMenu, MF_STRING, ID_MENU_RESET_DEFAULTS, L"恢复默认");
 
-                AppendMenu(hDataStoreMenu, MF_STRING | (g_data_location_mode == DATA_LOC_DEFAULT ? MF_CHECKED : 0), ID_MENU_DATA_LOC_DEFAULT, L"便携模式");
-                AppendMenu(hDataStoreMenu, MF_STRING | (g_data_location_mode == DATA_LOC_ONEDRIVE ? MF_CHECKED : 0), ID_MENU_DATA_LOC_ONEDRIVE, L"OneDrive");
-                AppendMenu(hDataStoreMenu, MF_STRING | (g_data_location_mode == DATA_LOC_CUSTOM ? MF_CHECKED : 0), ID_MENU_DATA_LOC_CUSTOM, L"自定义位置");
+                AppendMenu(hDataStoreMenu, MF_STRING | (g_data_location_mode == DATA_LOC_DEFAULT ? MF_CHECKED : 0) | (timer_setting_locked(ID_MENU_DATA_LOC_DEFAULT) ? MF_GRAYED : 0), ID_MENU_DATA_LOC_DEFAULT, L"便携模式");
+                AppendMenu(hDataStoreMenu, MF_STRING | (g_data_location_mode == DATA_LOC_ONEDRIVE ? MF_CHECKED : 0) | (timer_setting_locked(ID_MENU_DATA_LOC_ONEDRIVE) ? MF_GRAYED : 0), ID_MENU_DATA_LOC_ONEDRIVE, L"OneDrive");
+                AppendMenu(hDataStoreMenu, MF_STRING | (g_data_location_mode == DATA_LOC_CUSTOM ? MF_CHECKED : 0) | (timer_setting_locked(ID_MENU_DATA_LOC_CUSTOM) ? MF_GRAYED : 0), ID_MENU_DATA_LOC_CUSTOM, L"自定义位置");
 
-                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_POMODORO && idle_pomodoro_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_POMODORO, L"长番茄钟");
-                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_POMODORO && !idle_pomodoro_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_SHORT_POMODORO, L"短番茄钟");
-                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_BREAK && !idle_break_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_SHORT_BREAK, L"短休息");
-                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_BREAK && idle_break_is_long) ? MF_CHECKED : 0), ID_MENU_IDLE_LONG_BREAK, L"长休息");
-                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_COUNT_UP) ? MF_CHECKED : 0), ID_MENU_IDLE_COUNT_UP, L"正计时");
-                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((!is_running && !is_paused && idle_mode == IDLE_CUSTOM) ? MF_CHECKED : 0), ID_MENU_IDLE_CUSTOM, L"自定义计时");
+                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((timer_ui_is_ready() && timer_ui_resolve().mode == TIMER_LONG_POMODORO) ? MF_CHECKED : 0), ID_MENU_IDLE_POMODORO, L"长番茄钟");
+                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((timer_ui_is_ready() && timer_ui_resolve().mode == TIMER_SHORT_POMODORO) ? MF_CHECKED : 0), ID_MENU_IDLE_SHORT_POMODORO, L"短番茄钟");
+                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((timer_ui_is_ready() && timer_ui_resolve().mode == TIMER_SHORT_BREAK) ? MF_CHECKED : 0), ID_MENU_IDLE_SHORT_BREAK, L"短休息");
+                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((timer_ui_is_ready() && timer_ui_resolve().mode == TIMER_LONG_BREAK) ? MF_CHECKED : 0), ID_MENU_IDLE_LONG_BREAK, L"长休息");
+                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((timer_ui_is_ready() && timer_ui_resolve().mode == TIMER_COUNT_UP) ? MF_CHECKED : 0), ID_MENU_IDLE_COUNT_UP, L"正计时");
+                    AppendMenu(hIdleMenu, MF_STRING | idleAvailability | ((timer_ui_is_ready() && timer_ui_resolve().mode == TIMER_CUSTOM) ? MF_CHECKED : 0), ID_MENU_IDLE_CUSTOM, L"自定义计时");
 
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hControlMenu, L"会话");
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hStartMenu, L"切换");
@@ -3483,8 +3311,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hDurationMenu, L"时长");
                 AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hOptionMenu, L"偏好");
                 AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
-                AppendMenu(hMenu, MF_POPUP | ((is_running || is_paused) ? MF_GRAYED : 0), (UINT_PTR)hDataStoreMenu, L"存储");
-                AppendMenu(hMenu, MF_POPUP | ((is_running || is_paused) ? MF_GRAYED : 0), (UINT_PTR)hDataOpsMenu, L"备份");
+                AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hDataStoreMenu, L"存储");
+                AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hDataOpsMenu, L"备份");
                 AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
                 AppendMenu(hMenu, MF_STRING, ID_MENU_REPORT, L"统计");
                 AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
@@ -3495,6 +3323,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetCursor(LoadCursor(NULL, IDC_ARROW));
                 int cmd = track_popup_menu_dark(hMenu, hwnd, pt.x, pt.y);
 
+                timer_sync_clock(hwnd);
+                if (timer_ui_selection_locked(cmd) || timer_setting_locked(cmd)) cmd = 0;
                 // Handle menu commands
                 if (cmd >= ID_MENU_SCREEN_FIRST && cmd < ID_MENU_SCREEN_FIRST + FS_MAX_MONITORS)
                     fs_toggle_screen((size_t)(cmd - ID_MENU_SCREEN_FIRST));
@@ -3504,6 +3334,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                     case ID_MENU_FULLSCREEN_EXIT:
                         fs_exit();
+                        break;
+                    case ID_MENU_MICRO_COLOR:
+                        fs_show_color(hwnd, 6);
                         break;
                     case ID_MENU_FULLSCREEN_SIGNATURE:
                         fs_show_signature(hwnd);
@@ -3543,39 +3376,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         if (fs_active) fs_refresh();
                         break;
                     case ID_MENU_START_CURRENT:
-                        if (is_overtime) {
-                            stop_timer_thread_if_needed();
-                            clear_overtime_state();
-                            clear_count_up_state();
-                        }
-                        start_current_idle_mode(hwnd);
+                        if (timer_ui_can_start()) timer_primary_action(hwnd);
                         break;
                     case ID_MENU_PAUSE_RESUME:
+                        if (!timer_ui_can_pause()) break;
                         if (is_running) {
-                            stop_timer_thread_if_needed();
+                            stop_timer_clock();
                             is_paused = 1;
-                            refresh_timer_icon_by_state(hwnd);
-                        } else if (is_paused && (remaining_seconds > 0 || is_overtime) && (current_timer_mode != TIMER_NONE || is_overtime)) {
+                        } else if (is_paused) {
                             is_paused = 0;
                             is_running = 1;
-                            launch_timer_thread(hwnd);
-                            refresh_timer_icon_by_state(hwnd);
-                        } else {
-                            MessageBoxW(hwnd, L"当前没有可暂停或继续的计时。", L"提示", MB_OK | MB_ICONINFORMATION);
+                            launch_timer_clock(hwnd);
                         }
+                        refresh_timer_icon_by_state(hwnd);
                         break;
                     case ID_MENU_STOP:
-                        if (is_running || is_paused) {
-                            stop_timer_thread_if_needed();
-                            is_paused = 0;
-                            set_idle_mode_after_manual_stop();
-                            current_timer_mode = TIMER_NONE;
-                            remaining_seconds = 0;
-                            clear_count_up_state();
-                            clear_overtime_state();
-                            save_settings();
-                            refresh_timer_icon_by_state(hwnd);
-                        }
+                        timer_stop_action(hwnd);
                         break;
                     case 1: // Start long Pomodoro
                         start_mode_from_menu(hwnd, TIMER_LONG_POMODORO);
@@ -3617,8 +3433,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                     case 9: // Toggle Completion Dialog
                         settings.show_completion_dialog = !settings.show_completion_dialog;
+                        if (!settings.show_completion_dialog) close_toast_notification_if_open();
+                        else if (micro.phase == MICRO_WAIT_START || micro.phase == MICRO_WAIT_RESUME || is_overtime || completed_pending_mode != TIMER_NONE) {
+                            TimerMode notify_mode = micro.phase != MICRO_NONE ? TIMER_MICRO_BREAK : is_overtime ? overtime_source_mode : completed_pending_mode;
+                            if (!fs_active) ShowCompletionNotification(hwnd, notify_mode);
+                        }
                         save_settings();
                         break;
+                    case ID_MENU_ENABLE_MICRO_BREAK:
+                        settings.enable_micro_break = !settings.enable_micro_break;
+                        save_settings();
+                        break;
+                    case ID_MENU_MICRO_INTERVAL:
+                    case ID_MENU_MICRO_DURATION: {
+                        int value = cmd == ID_MENU_MICRO_INTERVAL ? settings.micro_break_interval_minutes : settings.micro_break_duration_minutes;
+                        int maximum = cmd == ID_MENU_MICRO_INTERVAL ? 720 : 60;
+                        if (PromptForInteger(hwnd, cmd == ID_MENU_MICRO_INTERVAL ? L"微休息间隔" : L"微休息时长", L"请输入分钟数:", value, 1, maximum, &value) &&
+                            !timer_setting_locked(cmd)) {
+                            if (cmd == ID_MENU_MICRO_INTERVAL) settings.micro_break_interval_minutes = value;
+                            else settings.micro_break_duration_minutes = value;
+                            save_settings();
+                        }
+                        break;
+                    }
                     case ID_MENU_ENABLE_POMODORO_COUNT:
                         settings.enable_pomodoro_count = !settings.enable_pomodoro_count;
                         save_settings();
@@ -3631,19 +3468,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     case ID_MENU_DEFAULT_LONG_POMODORO:
                     case ID_MENU_DEFAULT_SHORT_POMODORO:
                         settings.default_pomodoro_is_long = (cmd == ID_MENU_DEFAULT_LONG_POMODORO);
-                        if (!is_running && !is_paused && idle_mode == IDLE_POMODORO) {
-                            idle_pomodoro_is_long = settings.default_pomodoro_is_long;
-                            refresh_timer_icon_by_state(hwnd);
-                        }
+                        timer_refresh_toast();
+                        refresh_timer_icon_by_state(hwnd);
                         save_settings();
                         break;
                     case ID_MENU_DEFAULT_LONG_BREAK:
                     case ID_MENU_DEFAULT_SHORT_BREAK:
                         settings.default_break_is_long = (cmd == ID_MENU_DEFAULT_LONG_BREAK);
-                        if (!is_running && !is_paused && idle_mode == IDLE_BREAK) {
-                            idle_break_is_long = settings.default_break_is_long;
-                            refresh_timer_icon_by_state(hwnd);
-                        }
+                        timer_refresh_toast();
+                        refresh_timer_icon_by_state(hwnd);
                         save_settings();
                         break;
                     case ID_MENU_SET_POMODORO_DURATION: {
@@ -3663,9 +3496,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                     }
                     case ID_MENU_SET_LONG_POMODORO_COUNT: {
-                        if (!settings.enable_pomodoro_count) break;
                         int count = settings.long_pomodoro_count;
-                        if (PromptForInteger(hwnd, L"长番茄钟番茄钟数", L"请输入长番茄钟完成后计入的番茄钟数(1-12):", count, 1, 12, &count)) {
+                        if (PromptForInteger(hwnd, L"长番茄钟番茄钟数", L"请输入长番茄钟完成后计入的番茄钟数(1-12):", count, 1, 12, &count) && !timer_setting_locked(ID_MENU_SET_LONG_POMODORO_COUNT)) {
                             settings.long_pomodoro_count = count;
                             save_settings();
                         }
@@ -3697,8 +3529,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
                     case ID_MENU_SET_TOAST_COLLAPSE_SECONDS: {
                         int seconds = settings.toast_auto_collapse_seconds;
-                        if (PromptForInteger(hwnd, L"弹窗自动折叠", L"请输入自动折叠秒数(0-600，0=不自动折叠):", seconds, 0, 600, &seconds)) {
+                        if (PromptForInteger(hwnd, L"弹窗自动折叠", L"请输入自动折叠秒数(0-600，0=不自动折叠):", seconds, 0, 600, &seconds) && settings.show_completion_dialog) {
                             settings.toast_auto_collapse_seconds = seconds;
+                            if (g_hToastWnd) {
+                                KillTimer(g_hToastWnd, 1);
+                                if (seconds > 0 && !g_toast_collapsed) SetTimer(g_hToastWnd, 1, seconds * 1000, NULL);
+                            }
                             save_settings();
                         }
                         break;
@@ -3719,6 +3555,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                     case ID_MENU_RESET_DEFAULTS:
                         reset_defaults_keep_data();
+                        timer_apply_live_preferences();
                         if (save_settings()) {
                             refresh_timer_icon_by_state(hwnd);
                             MessageBoxW(hwnd, L"已恢复默认配置。", L"提示", MB_OK | MB_ICONINFORMATION);
@@ -3740,57 +3577,36 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         break;
                     }
                     case ID_MENU_RESET_COUNT:
-                        if (!settings.enable_pomodoro_count) break;
-                        if (is_running || is_paused) {
-                            MessageBoxW(hwnd, L"计时进行中，无法修改今日计数。", L"提示", MB_OK | MB_ICONINFORMATION);
-                            break;
-                        }
-                        if (!sync_today_count_to_target(0)) {
-                            MessageBoxW(hwnd, L"今日统计同步失败，无法写入调整记录。", L"错误", MB_OK | MB_ICONERROR);
-                            break;
-                        }
-                        pomodoro_count = 0;
-                        save_settings();
-                        if (g_hHeatmapWnd) InvalidateRect(g_hHeatmapWnd, NULL, TRUE);
-                        refresh_timer_icon_by_state(hwnd);
+                        timer_correct_today_count(hwnd, 0);
                         break;
                     case ID_MENU_SET_TIME: {
-                        if (!is_running && !is_paused) {
-                            MessageBoxW(hwnd, L"当前没有活动计时。", L"提示", MB_OK | MB_ICONINFORMATION);
-                            break;
-                        }
-                        if (is_overtime) {
-                            int minutes = overtime_seconds / 60;
-                            if (PromptForInteger(hwnd, L"修改已超时时间", L"请输入已超时分钟(0-720):", minutes, 0, 720, &minutes)) {
-                                overtime_seconds = minutes * 60;
-                                refresh_timer_icon_by_state(hwnd);
-                            }
-                            break;
-                        }
+                        if (!timer_can_edit_time()) break;
                         int minutes = is_count_up_timer ? remaining_seconds / 60 :
                             (remaining_seconds > 0 ? (remaining_seconds + 59) / 60 :
                             (settings.default_pomodoro_is_long ? get_long_pomodoro_duration() : settings.short_pomodoro_duration));
-                        int minMinutes = is_count_up_timer ?
-                            (count_up_credited * count_up_threshold_seconds + 59) / 60 : 1;
+                        int minMinutes = is_count_up_timer ? 0 : 1;
                         int maxMinutes = is_count_up_timer ? 9999 : 720;
                         const wchar_t* title = is_count_up_timer ? L"修改已计时时间" : L"修改剩余时间";
-                        const wchar_t* label = is_count_up_timer ? L"请输入已计时分钟(不能低于已计数阈值):" : L"请输入剩余分钟(1-720):";
+                        const wchar_t* label = is_count_up_timer ? L"请输入已计时分钟(0-9999):" : L"请输入剩余分钟(1-720):";
+                        unsigned generation = timer_stage_generation;
                         if (PromptForInteger(hwnd, title, label, minutes, minMinutes, maxMinutes, &minutes)) {
-                            remaining_seconds = minutes * 60;
-                            if (is_count_up_timer) credit_count_up_thresholds(hwnd);
-                            refresh_timer_icon_by_state(hwnd);
+                            timer_sync_clock(hwnd);
+                            if (generation == timer_stage_generation && timer_can_edit_time()) {
+                                remaining_seconds = minutes * 60;
+                                timer_last_tick = GetTickCount64();
+                                if (is_count_up_timer) credit_count_up_thresholds(hwnd);
+                                refresh_timer_icon_by_state(hwnd);
+                            } else {
+                                MessageBoxW(hwnd,L"计时阶段已变化，输入未应用。",L"提示",MB_OK|MB_ICONINFORMATION);
+                            }
                         }
                         break;
                     }
                     case ID_MENU_PLUS_5_MIN:
-                        if (is_running || is_paused) {
-                            if (is_overtime) {
-                                overtime_seconds = clamp_int(overtime_seconds + settings.adjust_block_minutes * 60, 0, 720 * 60);
-                                refresh_timer_icon_by_state(hwnd);
-                                break;
-                            }
+                        if (timer_can_edit_time()) {
                             int maxSeconds = is_count_up_timer ? 9999 * 60 : 12 * 60 * 60;
-                            remaining_seconds = clamp_int(remaining_seconds + settings.adjust_block_minutes * 60,
+                            timer_last_tick = GetTickCount64();
+                            remaining_seconds = clamp_int(timer_saturating_add(remaining_seconds, settings.adjust_block_minutes * 60),
                                 is_count_up_timer ? 0 : 60, maxSeconds);
                             if (is_count_up_timer) credit_count_up_thresholds(hwnd);
                             refresh_timer_icon_by_state(hwnd);
@@ -3799,14 +3615,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         }
                         break;
                     case ID_MENU_MINUS_5_MIN:
-                        if (is_running || is_paused) {
-                            if (is_overtime) {
-                                overtime_seconds = clamp_int(overtime_seconds - settings.adjust_block_minutes * 60, 0, 720 * 60);
-                                refresh_timer_icon_by_state(hwnd);
-                                break;
-                            }
-                            int minSeconds = is_count_up_timer ? count_up_credited * count_up_threshold_seconds : 1;
+                        if (timer_can_edit_time()) {
+                            int minSeconds = is_count_up_timer ? 0 : 1;
                             int maxSeconds = is_count_up_timer ? 9999 * 60 : 12 * 60 * 60;
+                            timer_last_tick = GetTickCount64();
                             remaining_seconds = clamp_int(remaining_seconds - settings.adjust_block_minutes * 60, minSeconds, maxSeconds);
                             refresh_timer_icon_by_state(hwnd);
                         } else {
@@ -3814,27 +3626,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         }
                         break;
                     case ID_MENU_SET_COUNT: {
-                        if (!settings.enable_pomodoro_count) break;
-                        if (is_running || is_paused) {
-                            MessageBoxW(hwnd, L"计时进行中，无法修改今日计数。", L"提示", MB_OK | MB_ICONINFORMATION);
-                            break;
-                        }
-                        int count = pomodoro_count;
-                        if (PromptForInteger(hwnd, L"修改今日番茄数", L"请输入今日已完成番茄钟数量(0-9999):", count, 0, 9999, &count)) {
-                            if (!sync_today_count_to_target(count)) {
-                                MessageBoxW(hwnd, L"今日统计同步失败，无法写入调整记录。", L"错误", MB_OK | MB_ICONERROR);
-                                break;
-                            }
-                            pomodoro_count = count;
-                            save_settings();
-                            if (g_hHeatmapWnd) InvalidateRect(g_hHeatmapWnd, NULL, TRUE);
-                            refresh_timer_icon_by_state(hwnd);
-                        }
+                        int count = get_today_count_from_storage();
+                        if (PromptForInteger(hwnd, L"修改今日番茄数", L"请输入今日已完成番茄钟数量(0-9999):", count, 0, 9999, &count))
+                            timer_correct_today_count(hwnd, count);
                         break;
                     }
                     case ID_MENU_IDLE_POMODORO:
+                        timer_select_idle();
+                        completed_pending_mode = TIMER_NONE;
+                        close_toast_notification_if_open();
+                        ++timer_stage_generation;
                         if (is_running || is_paused) {
-                            stop_timer_thread_if_needed();
+                            stop_timer_clock();
                             is_paused = 0;
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
@@ -3847,8 +3650,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         refresh_timer_icon_by_state(hwnd);
                         break;
                     case ID_MENU_IDLE_SHORT_POMODORO:
+                        timer_select_idle();
+                        completed_pending_mode = TIMER_NONE;
+                        close_toast_notification_if_open();
+                        ++timer_stage_generation;
                         if (is_running || is_paused) {
-                            stop_timer_thread_if_needed();
+                            stop_timer_clock();
                             is_paused = 0;
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
@@ -3861,8 +3668,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         refresh_timer_icon_by_state(hwnd);
                         break;
                     case ID_MENU_IDLE_SHORT_BREAK:
+                        timer_select_idle();
+                        completed_pending_mode = TIMER_NONE;
+                        close_toast_notification_if_open();
+                        ++timer_stage_generation;
                         if (is_running || is_paused) {
-                            stop_timer_thread_if_needed();
+                            stop_timer_clock();
                             is_paused = 0;
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
@@ -3875,8 +3686,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         refresh_timer_icon_by_state(hwnd);
                         break;
                     case ID_MENU_IDLE_LONG_BREAK:
+                        timer_select_idle();
+                        completed_pending_mode = TIMER_NONE;
+                        close_toast_notification_if_open();
+                        ++timer_stage_generation;
                         if (is_running || is_paused) {
-                            stop_timer_thread_if_needed();
+                            stop_timer_clock();
                             is_paused = 0;
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
@@ -3889,8 +3704,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         refresh_timer_icon_by_state(hwnd);
                         break;
                     case ID_MENU_IDLE_COUNT_UP:
+                        timer_select_idle();
+                        completed_pending_mode = TIMER_NONE;
+                        close_toast_notification_if_open();
+                        ++timer_stage_generation;
                         if (is_running || is_paused) {
-                            stop_timer_thread_if_needed();
+                            stop_timer_clock();
                             is_paused = 0;
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
@@ -3902,8 +3721,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         refresh_timer_icon_by_state(hwnd);
                         break;
                     case ID_MENU_IDLE_CUSTOM:
+                        timer_select_idle();
+                        completed_pending_mode = TIMER_NONE;
+                        close_toast_notification_if_open();
+                        ++timer_stage_generation;
                         if (is_running || is_paused) {
-                            stop_timer_thread_if_needed();
+                            stop_timer_clock();
                             is_paused = 0;
                             current_timer_mode = TIMER_NONE;
                             remaining_seconds = 0;
@@ -3923,6 +3746,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 DestroyMenu(hMenu);
                 g_hMenu = NULL;
+                /* Default durations may change the ready view while no clock is running. */
+                if (cmd && IsWindow(hwnd)) {
+                    refresh_timer_icon_by_state(hwnd);
+                    if (fs_active) fs_refresh();
+                }
                 if (fs_active && fs_count) {
                     SetForegroundWindow(fs_windows[0]);
                     SetFocus(fs_windows[0]);
@@ -3960,6 +3788,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             fs_in_menu_loop = 0;
             return 0;
         case WM_TIMER:
+            if (wParam == ID_TIMER_CLOCK) { timer_sync_clock(hwnd); return 0; }
             if (wParam == ID_FS_REFRESH) { fs_refresh(); return 0; }
             if (wParam == ID_FS_LAYOUT) { KillTimer(hwnd, ID_FS_LAYOUT); fs_build_windows(); return 0; }
             if (wParam == ID_MAIN_DAY_SYNC_TIMER) {
@@ -3983,7 +3812,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             fs_exit();
             KillTimer(hwnd, ID_MAIN_DAY_SYNC_TIMER);
             KillTimer(hwnd, ID_TRAY_RETRY_TIMER);
-            stop_timer_thread_if_needed();
+            stop_timer_clock();
             is_paused = 0;
             if (g_settings_lock_ready) {
                 DeleteCriticalSection(&g_settings_file_lock);
@@ -3993,7 +3822,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             PostQuitMessage(0);
             break;
         case WM_TOAST_NOTIFY:
-            if (!fs_active) ShowCompletionNotification(hwnd, (int)wParam);
+            if ((unsigned)lParam == timer_stage_generation && settings.show_completion_dialog && !fs_active)
+                ShowCompletionNotification(hwnd, (int)wParam);
             return 0;
         case WM_SETTINGS_SAVE_FAILED:
             MessageBoxW(hwnd,
@@ -4087,6 +3917,9 @@ void load_settings() {
     settings.default_break_is_long = 0;
     settings.enable_pomodoro_count = 1;
     settings.enable_overtime_count_up = 1;
+    settings.enable_micro_break = 0;
+    settings.micro_break_interval_minutes = 15;
+    settings.micro_break_duration_minutes = 1;
     memcpy(settings.fullscreen_colors, fs_default_colors, sizeof(fs_default_colors));
     memcpy(settings.fullscreen_scales, fs_default_scales, sizeof(fs_default_scales));
     {
@@ -4120,6 +3953,9 @@ void load_settings() {
             settings.default_pomodoro_is_long = extract_json_int(buf, "\"default_pomodoro_is_long\"", settings.default_pomodoro_is_long);
             settings.default_break_is_long = extract_json_int(buf, "\"default_break_is_long\"", settings.default_break_is_long);
             settings.enable_pomodoro_count = extract_json_int(buf, "\"enable_pomodoro_count\"", settings.enable_pomodoro_count);
+            settings.enable_micro_break = extract_json_int(buf, "\"enable_micro_break\"", 0);
+            settings.micro_break_interval_minutes = extract_json_int(buf, "\"micro_break_interval_minutes\"", 15);
+            settings.micro_break_duration_minutes = extract_json_int(buf, "\"micro_break_duration_minutes\"", 1);
             settings.enable_overtime_count_up = extract_json_int(buf, "\"enable_overtime_count_up\"", settings.enable_overtime_count_up);
             {
                 int i;
@@ -4164,6 +4000,9 @@ void load_settings() {
     settings.default_break_is_long = settings.default_break_is_long ? 1 : 0;
     settings.enable_pomodoro_count = settings.enable_pomodoro_count ? 1 : 0;
     settings.enable_overtime_count_up = settings.enable_overtime_count_up ? 1 : 0;
+    settings.enable_micro_break = settings.enable_micro_break ? 1 : 0;
+    settings.micro_break_interval_minutes = clamp_int(settings.micro_break_interval_minutes, 1, 720);
+    settings.micro_break_duration_minutes = clamp_int(settings.micro_break_duration_minutes, 1, 60);
     pomodoro_count = clamp_int(pomodoro_count, 0, 9999);
     if (idle_mode != IDLE_POMODORO && idle_mode != IDLE_BREAK && idle_mode != IDLE_CUSTOM && idle_mode != IDLE_COUNT_UP) {
         idle_mode = IDLE_POMODORO;
@@ -4201,6 +4040,9 @@ int save_settings(void) {
             settings.fullscreen_show_text, settings.fullscreen_show_signature, settings.fullscreen_show_mouse_tips) >= 0;
         {
             int i;
+            if (writeOk) writeOk = fprintf(fp, ",\"enable_micro_break\":%d,\"micro_break_interval_minutes\":%d,\"micro_break_duration_minutes\":%d,\"fullscreen_micro_break_color\":%d,\"fullscreen_micro_break_scale\":%d",
+                settings.enable_micro_break, settings.micro_break_interval_minutes, settings.micro_break_duration_minutes,
+                settings.fullscreen_colors[6], settings.fullscreen_scales[6]) >= 0;
             for (i = 0; writeOk && i < FS_COLOR_COUNT; ++i) {
                 writeOk = fprintf(fp, ",%s:", fs_font_keys[i]) >= 0 &&
                           settings_json_write_string(fp, settings.fullscreen_fonts[i]);
@@ -4276,7 +4118,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     InitializeCriticalSection(&g_settings_file_lock);
     g_settings_lock_ready = 1;
     load_data_location_from_registry();
-    load_settings();
+    load_settings_preserving_runtime();
     pomodoro_count = get_today_count_from_storage();
     refresh_today_count_if_day_changed(NULL, 1);
     // Startup begins with the user's selected default Pomodoro mode.

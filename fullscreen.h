@@ -39,10 +39,10 @@
 #define WM_FS_MAINTAIN_LAYER (WM_APP + 104)
 
 /* Persist RGB values, not Windows' byte-reversed COLORREF representation. */
-static const int fs_default_colors[FS_COLOR_COUNT] = {0x7F8C98, 0x829889, 0x8C86A3, 0xA39182, 0xC79A52, 0xC4B8A8};
+static const int fs_default_colors[FS_COLOR_COUNT] = {0x7F8C98, 0x829889, 0x8C86A3, 0xA39182, 0xC79A52, 0xC4B8A8, 0x829889};
 static const char *fs_color_keys[FS_COLOR_COUNT] = {
     "\"fullscreen_focus_color\"", "\"fullscreen_break_color\"",
-    "\"fullscreen_count_up_color\"", "\"fullscreen_custom_color\"", "\"fullscreen_overtime_color\"", "\"fullscreen_signature_color\""
+    "\"fullscreen_count_up_color\"", "\"fullscreen_custom_color\"", "\"fullscreen_overtime_color\"", "\"fullscreen_signature_color\"", "\"fullscreen_micro_break_color\""
 };
 
 typedef struct {
@@ -86,17 +86,17 @@ static const FullscreenScaleOption fs_scale_options[] = {
 };
 #define FS_SCALE_COUNT (sizeof(fs_scale_options) / sizeof(fs_scale_options[0]))
 
-static const int fs_default_scales[FS_COLOR_COUNT] = {100, 100, 100, 100, 100, 100};
+static const int fs_default_scales[FS_COLOR_COUNT] = {100, 100, 100, 100, 100, 100, 100};
 static const wchar_t *fs_default_fonts[FS_COLOR_COUNT] = {
-    L"Segoe UI", L"Segoe UI", L"Segoe UI", L"Segoe UI", L"Segoe UI", L"KaiTi"
+    L"Segoe UI", L"Segoe UI", L"Segoe UI", L"Segoe UI", L"Segoe UI", L"KaiTi", L"Segoe UI"
 };
 static const char *fs_scale_keys[FS_COLOR_COUNT] = {
     "\"fullscreen_focus_scale\"", "\"fullscreen_break_scale\"",
-    "\"fullscreen_count_up_scale\"", "\"fullscreen_custom_scale\"", "\"fullscreen_overtime_scale\"", "\"fullscreen_signature_scale\""
+    "\"fullscreen_count_up_scale\"", "\"fullscreen_custom_scale\"", "\"fullscreen_overtime_scale\"", "\"fullscreen_signature_scale\"", "\"fullscreen_micro_break_scale\""
 };
 static const char *fs_font_keys[FS_COLOR_COUNT] = {
     "\"fullscreen_focus_font\"", "\"fullscreen_break_font\"",
-    "\"fullscreen_count_up_font\"", "\"fullscreen_custom_font\"", "\"fullscreen_overtime_font\"", "\"fullscreen_signature_font\""
+    "\"fullscreen_count_up_font\"", "\"fullscreen_custom_font\"", "\"fullscreen_overtime_font\"", "\"fullscreen_signature_font\"", "\"fullscreen_micro_break_font\""
 };
 
 typedef struct {
@@ -123,6 +123,7 @@ typedef struct {
 static FullscreenSignatureDraft *fs_signature_draft;
 static int fs_preview_active, fs_preview_started;
 static HWND fs_preview_dialog;
+static HWND fs_editor_dialog;
 static int fs_preview_focus;
 static FullscreenView fs_preview_view;
 static void fs_end_preview(void);
@@ -136,6 +137,8 @@ typedef struct {
 } FullscreenMonitor;
 typedef struct { FullscreenMonitor items[FS_MAX_MONITORS]; size_t count; } FullscreenMonitors;
 static FullscreenMonitors fs_menu_monitors;
+static wchar_t fs_preview_selection[FS_MAX_MONITORS][128];
+static size_t fs_preview_selection_count;
 
 static HWND *fs_windows;
 static size_t fs_count;
@@ -181,6 +184,7 @@ static void fs_maintain_layer(int force_suppress);
 static void fs_start_guard(void);
 static void fs_stop_guard(void);
 static void fs_restore_hidden_windows(void);
+static void fs_close_clicked_window(HWND window);
 static HANDLE fs_enter_dpi(void);
 static void fs_leave_dpi(HANDLE previous);
 
@@ -205,20 +209,11 @@ static int fs_parse_color(const wchar_t *text, int *rgb) {
     return 1;
 }
 
-static const wchar_t *fs_mode_name(TimerMode mode) {
-    switch (mode) {
-        case TIMER_LONG_POMODORO: return L"长番茄钟";
-        case TIMER_SHORT_POMODORO: return L"短番茄钟";
-        case TIMER_SHORT_BREAK: return L"短休息";
-        case TIMER_LONG_BREAK: return L"长休息";
-        case TIMER_COUNT_UP: return L"正计时";
-        case TIMER_CUSTOM: return L"自定义计时";
-        default: return L"番茄钟";
-    }
-}
+static const wchar_t *fs_mode_name(TimerMode mode) { return timer_mode_name(mode); }
 
 static int fs_mode_color(TimerMode mode) {
     if (mode == TIMER_SHORT_BREAK || mode == TIMER_LONG_BREAK) return 1;
+    if (mode == TIMER_MICRO_BREAK) return 6;
     if (mode == TIMER_COUNT_UP) return 2;
     if (mode == TIMER_CUSTOM) return 3;
     return 0;
@@ -230,39 +225,12 @@ static void fs_format_time(wchar_t *out, size_t capacity, int seconds, int overt
 }
 
 /* Presentation only: never start, stop, credit, or advance a timer here. */
-static void fs_read_view(FullscreenView *view) {
-    TimerMode mode = current_timer_mode;
-    int seconds = remaining_seconds;
-    int active = is_running || is_paused;
-    int overtime = active && is_overtime;
-    const wchar_t *suffix = is_paused ? L" · 已暂停" : L"";
-    if (fs_preview_active) { *view = fs_preview_view; return; }
+static void fs_read_timer_view(FullscreenView *view) {
+    TimerUiView timer = timer_ui_resolve();
+    TimerMode mode = timer.mode;
+    int seconds = timer.seconds, overtime = timer.overtime;
     memset(view, 0, sizeof(*view));
-    if (overtime) {
-        mode = overtime_source_mode;
-        seconds = overtime_seconds;
-        swprintf(view->status, 96, L"%ls · 超时正计时%ls", fs_mode_name(mode), suffix);
-    } else {
-        if (!active && fs_completed_mode != TIMER_NONE) {
-            mode = fs_completed_mode;
-            seconds = 0;
-            suffix = L" · 已完成";
-        } else if (!active) {
-            suffix = L" · 未开始";
-            if (idle_mode == IDLE_BREAK) {
-                mode = idle_break_is_long ? TIMER_LONG_BREAK : TIMER_SHORT_BREAK;
-                seconds = (idle_break_is_long ? settings.long_break_duration : settings.short_break_duration) * 60;
-            } else if (idle_mode == IDLE_COUNT_UP) {
-                mode = TIMER_COUNT_UP; seconds = 0;
-            } else if (idle_mode == IDLE_CUSTOM) {
-                mode = TIMER_CUSTOM; seconds = settings.custom_duration * 60;
-            } else {
-                mode = idle_pomodoro_is_long ? TIMER_LONG_POMODORO : TIMER_SHORT_POMODORO;
-                seconds = (idle_pomodoro_is_long ? settings.long_pomodoro_duration : settings.short_pomodoro_duration) * 60;
-            }
-        }
-        swprintf(view->status, 96, L"%ls%ls", fs_mode_name(mode), suffix);
-    }
+    timer_ui_status(view->status, 96, timer);
     int color_index = overtime ? 4 : fs_mode_color(mode);
     fs_format_time(view->time, 32, seconds, overtime);
     view->color = settings.fullscreen_colors[color_index];
@@ -273,6 +241,11 @@ static void fs_read_view(FullscreenView *view) {
     wcscpy(view->signature_font, settings.fullscreen_fonts[5][0] ? settings.fullscreen_fonts[5] : L"KaiTi");
     view->signature_scale = settings.fullscreen_scales[5] > 0 ? settings.fullscreen_scales[5] : 100;
     if (settings.fullscreen_show_signature) wcscpy(view->signature, settings.fullscreen_signature);
+}
+
+static void fs_read_view(FullscreenView *view) {
+    if (fs_preview_active) { *view = fs_preview_view; return; }
+    fs_read_timer_view(view);
 }
 
 static void fs_refresh(void) {
@@ -323,6 +296,15 @@ static void fs_enforce_topmost(void) {
             SetWindowPos(fs_windows[i], HWND_TOPMOST, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
         }
+    }
+    /* Keep the application's editor (and its native color picker) above the overlays. */
+    if (!fs_preview_active && IsWindow(fs_editor_dialog) && IsWindowVisible(fs_editor_dialog)) {
+        HWND popup = GetLastActivePopup(fs_editor_dialog);
+        SetWindowPos(fs_editor_dialog, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        if (popup != fs_editor_dialog && IsWindow(popup) && IsWindowVisible(popup))
+            SetWindowPos(popup, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     }
 }
 
@@ -568,6 +550,50 @@ static void fs_draw_signature_text(HDC dc, const wchar_t *text, RECT rect) {
 }
 
 /* Shared by the real windows and the dialog preview, including line wrapping. */
+typedef struct {
+    int split, left, dot, right, dot_width, half_extent, left_length;
+    const wchar_t *right_text;
+} FullscreenStatusLayout;
+static FullscreenStatusLayout fs_status_layout(HDC dc, RECT bounds, const wchar_t *text) {
+    FullscreenStatusLayout layout = {0};
+    int center = bounds.left + (bounds.right - bounds.left) / 2;
+    const wchar_t *dot = wcschr(text, L'·');
+    SIZE left = {0}, right = {0}, symbol = {0}, space = {0};
+    if (!dot) {
+        GetTextExtentPoint32W(dc, text, (int)wcslen(text), &left);
+        layout.left = center - left.cx / 2; layout.half_extent = (left.cx + 1) / 2;
+        return layout;
+    }
+    layout.split = 1; layout.left_length = (int)(dot - text);
+    while (layout.left_length && text[layout.left_length - 1] == L' ') --layout.left_length;
+    layout.right_text = dot + 1;
+    while (*layout.right_text == L' ') ++layout.right_text;
+    GetTextExtentPoint32W(dc, text, layout.left_length, &left);
+    GetTextExtentPoint32W(dc, layout.right_text, (int)wcslen(layout.right_text), &right);
+    GetTextExtentPoint32W(dc, L"·", 1, &symbol);
+    GetTextExtentPoint32W(dc, L" ", 1, &space);
+    layout.dot_width = symbol.cx; layout.dot = center - symbol.cx / 2;
+    layout.left = layout.dot - space.cx - left.cx;
+    layout.right = layout.dot + symbol.cx + space.cx;
+    layout.half_extent = max(center - layout.left, layout.right + right.cx - center);
+    return layout;
+}
+static void fs_draw_status(HDC dc, RECT line, const wchar_t *text) {
+    FullscreenStatusLayout layout = fs_status_layout(dc, line, text);
+    if (!layout.split) { DrawTextW(dc, text, -1, &line, DT_CENTER | DT_NOPREFIX | DT_SINGLELINE); return; }
+    RECT part = line; part.left = layout.left; part.right = layout.dot;
+    DrawTextW(dc, text, layout.left_length, &part, DT_LEFT | DT_NOPREFIX | DT_SINGLELINE);
+    part.left = layout.dot; part.right = layout.dot + layout.dot_width;
+    DrawTextW(dc, L"·", 1, &part, DT_LEFT | DT_NOPREFIX | DT_SINGLELINE);
+    part.left = layout.right; part.right = line.right;
+    DrawTextW(dc, layout.right_text, -1, &part, DT_LEFT | DT_NOPREFIX | DT_SINGLELINE);
+}
+
+static void fs_mouse_hint(wchar_t *out, size_t capacity) {
+    if (fs_preview_active) swprintf(out, capacity, L"左键 / 中键 / Esc：返回编辑");
+    else swprintf(out, capacity, L"左键：退出此屏　中键 / Esc：退出全部　右键：%ls\n中键点击托盘：全部全屏    拖动托盘图标：目标屏幕全屏", timer_ui_primary_label());
+}
+
 static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hud) {
     int width = bounds.right - bounds.left, height = bounds.bottom - bounds.top;
     int is_portrait = height > width;
@@ -650,6 +676,18 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
     label = CreateFontW(-label_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, digit_font);
     SelectObject(dc, label);
+    if (view->show_text) {
+        FullscreenStatusLayout layout = fs_status_layout(dc, bounds, view->status);
+        int available = max(1, width * 4 / 10);
+        while (layout.half_extent > available && label_size > 1) {
+            int next_size = max(1, MulDiv(label_size, available, layout.half_extent));
+            if (next_size >= label_size) next_size = label_size - 1;
+            SelectObject(dc, previous); DeleteObject(label); label_size = next_size;
+            label = CreateFontW(-label_size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, digit_font);
+            SelectObject(dc, label); layout = fs_status_layout(dc, bounds, view->status);
+        }
+    }
     GetTextMetricsW(dc, &tm_label);
 
     has_status = (view->show_text && view->status[0]);
@@ -694,7 +732,7 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
         current_y += time_gap;
         line = bounds; line.top = current_y; line.bottom = current_y + status_height;
         SelectObject(dc, label);
-        DrawTextW(dc, view->status, -1, &line, DT_CENTER | DT_NOPREFIX | DT_SINGLELINE);
+        fs_draw_status(dc, line, view->status);
         current_y = line.bottom;
     }
     if (signature_height) {
@@ -716,8 +754,9 @@ static void fs_draw_view(HDC dc, RECT bounds, const FullscreenView *view, int hu
         line = bounds; line.left += width / 30; line.right -= width / 30;
         line.top = bounds.bottom - hud_size * 5; line.bottom = bounds.bottom - hud_size;
         SetTextColor(dc, RGB(150, 155, 160));
-        DrawTextW(dc, fs_preview_active ? L"左键 / 中键 / Esc：返回编辑" :
-            L"左键 / 中键 / Esc：退出全屏    右键：开始 / 停止\n中键点击托盘：全部全屏    拖动托盘图标：目标屏幕全屏", -1,
+        wchar_t hint[192];
+        fs_mouse_hint(hint, 192);
+        DrawTextW(dc, hint, -1,
             &line, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
         SelectObject(dc, previous); DeleteObject(font);
     }
@@ -819,6 +858,9 @@ static LRESULT CALLBACK FullscreenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             fs_refresh();
             return 0;
         case WM_LBUTTONDOWN:
+            if (fs_preview_active) fs_exit();
+            else fs_close_clicked_window(hwnd);
+            return 0;
         case WM_MBUTTONDOWN:
         case WM_XBUTTONDOWN:
         case WM_CLOSE:
@@ -929,6 +971,17 @@ static void fs_remove_window(size_t index) {
     if (fs_count && fs_hud_visible) SetTimer(fs_windows[0], ID_FS_HUD_TIMER, 1500, NULL);
     if (had_focus && fs_count) { SetForegroundWindow(fs_windows[0]); SetFocus(fs_windows[0]); }
 }
+static void fs_close_clicked_window(HWND window) {
+    size_t i;
+    for (i = 0; i < fs_count; ++i) {
+        if (fs_windows[i] != window) continue;
+        /* Last-screen exit must run the complete teardown before destroying its window. */
+        if (fs_count == 1) fs_exit();
+        else fs_remove_window(i);
+        return;
+    }
+}
+
 static int fs_begin(void) {
     WNDCLASSW wc = {0};
     if (fs_active) return 1;
@@ -976,8 +1029,8 @@ static int fs_add_screen(const FullscreenMonitor *item) {
     fs_maintain_layer(1);
     return 1;
 }
-/* Reconcile only selected, still-connected devices; never add newly connected screens. */
-static void fs_reconcile_monitors(const FullscreenMonitors *list) {
+/* Ordinary fullscreen retains selection; preview reconciles every online device. */
+static void fs_reconcile_selection(const FullscreenMonitors *list, int add_all) {
     size_t i = 0, j;
     HANDLE previous = fs_enter_dpi();
     fs_building = 1;
@@ -997,13 +1050,19 @@ static void fs_reconcile_monitors(const FullscreenMonitors *list) {
         }
         ++i;
     }
+    if (add_all) {
+        for (j = 0; j < list->count; ++j) fs_add_screen(&list->items[j]);
+    }
     fs_building = 0;
     fs_leave_dpi(previous);
     if (!fs_count) fs_exit();
 }
+static void fs_reconcile_monitors(const FullscreenMonitors *list) {
+    fs_reconcile_selection(list, 0);
+}
 static void fs_build_windows(void) {
     FullscreenMonitors list;
-    if (fs_active && fs_get_monitors(&list)) fs_reconcile_monitors(&list);
+    if (fs_active && fs_get_monitors(&list)) fs_reconcile_selection(&list, fs_preview_active);
 }
 static void fs_show_all(void) {
     FullscreenMonitors list;
@@ -1070,7 +1129,7 @@ static HMENU fs_create_menu(void) {
         AppendMenuW(menu, MF_STRING | (fs_window_index(fs_menu_monitors.items[i].identity) >= 0 ? MF_CHECKED : 0),
             ID_MENU_SCREEN_FIRST + i, fs_menu_monitors.items[i].label);
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(menu, MF_STRING | (settings.fullscreen_show_text ? MF_CHECKED : 0), ID_MENU_FULLSCREEN_SHOW_TEXT, L"显示状态");
+    AppendMenuW(menu, MF_STRING | (settings.fullscreen_show_text ? MF_CHECKED : 0), ID_MENU_FULLSCREEN_SHOW_TEXT, L"显示模式");
     AppendMenuW(menu, MF_STRING | (settings.fullscreen_show_signature ? MF_CHECKED : 0), ID_MENU_FULLSCREEN_SHOW_SIGNATURE, L"显示签名");
     AppendMenuW(menu, MF_STRING | (settings.fullscreen_show_mouse_tips ? MF_CHECKED : 0), ID_MENU_FULLSCREEN_SHOW_MOUSE_TIPS, L"显示鼠标提示");
     return menu;
@@ -1123,27 +1182,56 @@ static INT_PTR fs_preview_brush(WPARAM wParam, int rgb) {
 
 /* Both editors use one reversible preview session. No timer or saved setting is modified. */
 static void fs_start_preview(HWND dialog, int focus, const FullscreenView *view) {
+    size_t i;
+    if (fs_preview_active) return;
+    fs_preview_selection_count = fs_count;
+    for (i = 0; i < fs_count; ++i) {
+        FullscreenMonitor *item = (FullscreenMonitor *)GetWindowLongPtrW(fs_windows[i], GWLP_USERDATA);
+        wcscpy(fs_preview_selection[i], item->identity);
+    }
     fs_preview_dialog = dialog;
     fs_preview_focus = focus;
     fs_preview_view = *view;
     fs_preview_started = !fs_active;
     fs_preview_active = 1;
     ShowWindow(dialog, SW_HIDE);
-    if (!fs_active) fs_show_all();
-    else {
+    fs_show_all();
+    if (fs_preview_active) {
+        fs_build_windows();
         fs_refresh();
-        SetForegroundWindow(fs_windows[0]); SetFocus(fs_windows[0]);
+        if (!fs_count) fs_end_preview();
     }
-    if (!fs_count && fs_preview_active) fs_end_preview();
 }
 static void fs_end_preview(void) {
     int started = fs_preview_started;
     HWND dialog = fs_preview_dialog;
+    FullscreenMonitors online, selected = {0};
+    size_t i, j;
     fs_preview_active = 0;
     fs_preview_started = 0;
     fs_preview_dialog = NULL;
-    if (started || !fs_count) fs_exit();
-    else fs_refresh();
+    if (started || !fs_preview_selection_count) fs_exit();
+    else if (fs_get_monitors(&online)) {
+        for (i = 0; i < online.count; ++i) {
+            for (j = 0; j < fs_preview_selection_count; ++j)
+                if (!wcscmp(online.items[i].identity, fs_preview_selection[j])) break;
+            if (j < fs_preview_selection_count) selected.items[selected.count++] = online.items[i];
+        }
+        if (selected.count && fs_begin()) fs_reconcile_selection(&selected, 1);
+        else fs_exit();
+        if (fs_active) fs_refresh();
+    } else {
+        /* Enumeration failure: retain only saved identities, never leave temporary screens selected. */
+        i = 0;
+        while (i < fs_count) {
+            FullscreenMonitor *item = (FullscreenMonitor *)GetWindowLongPtrW(fs_windows[i], GWLP_USERDATA);
+            for (j = 0; j < fs_preview_selection_count; ++j)
+                if (!wcscmp(item->identity, fs_preview_selection[j])) break;
+            if (j == fs_preview_selection_count) fs_remove_window(i); else ++i;
+        }
+        if (!fs_count) fs_exit(); else fs_refresh();
+    }
+    fs_preview_selection_count = 0;
     if (IsWindow(dialog)) {
         ShowWindow(dialog, SW_SHOW);
         SetWindowPos(dialog, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
@@ -1256,6 +1344,7 @@ static INT_PTR CALLBACK FullscreenSignatureDlgProc(HWND dialog, UINT msg, WPARAM
             draft = (FullscreenSignatureDraft *)lParam;
             draft->dialog = dialog;
             SetWindowLongPtrW(dialog, DWLP_USER, (LONG_PTR)draft);
+            fs_editor_dialog = dialog;
             SendDlgItemMessageW(dialog, IDC_FS_SIGNATURE, EM_SETLIMITTEXT, 32767, 0);
             SendDlgItemMessageW(dialog, IDC_FS_SIGNATURE_COLOR, EM_SETLIMITTEXT, 7, 0);
             SetDlgItemTextW(dialog, IDC_FS_SIGNATURE, draft->text);
@@ -1337,6 +1426,7 @@ static INT_PTR CALLBACK FullscreenSignatureDlgProc(HWND dialog, UINT msg, WPARAM
             break;
         case WM_CLOSE: EndDialog(dialog, IDCANCEL); return TRUE;
         case WM_DESTROY:
+            if (fs_editor_dialog == dialog) fs_editor_dialog = NULL;
             if (draft && draft->preview_font) { DeleteObject(draft->preview_font); draft->preview_font = NULL; }
             break;
     }
@@ -1358,22 +1448,26 @@ static void fs_show_signature(HWND owner) {
     if (fs_active && fs_count) { SetForegroundWindow(fs_windows[0]); SetFocus(fs_windows[0]); }
 }
 
-static const wchar_t *fs_color_names[FS_COLOR_COUNT] = {L"番茄钟", L"休息", L"正计时", L"自定义", L"超时", L"签名"};
+static const wchar_t *fs_color_names[FS_COLOR_COUNT] = {L"番茄钟", L"休息", L"正计时", L"自定义", L"超时", L"签名", L"微休息"};
 typedef struct {
     int index;
+    TimerUiView preview_timer;
     int color;
     wchar_t font[32];
     int scale;
     HFONT preview_font;
 } FullscreenColorDraft;
 
-static UINT fs_color_command(int index) { return index == 5 ? ID_MENU_FULLSCREEN_SIGNATURE : ID_MENU_COLOR_FIRST + index; }
+static UINT fs_color_command(int index) { return index == 5 ? ID_MENU_FULLSCREEN_SIGNATURE : index == 6 ? ID_MENU_MICRO_COLOR : ID_MENU_COLOR_FIRST + index; }
 static HMENU fs_create_preview_menu(void) {
     HMENU menu = CreatePopupMenu();
     int i;
     AppendMenuW(menu, MF_STRING, fs_color_command(5), fs_color_names[5]);
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-    for (i = 0; i < 5; ++i) AppendMenuW(menu, MF_STRING, fs_color_command(i), fs_color_names[i]);
+    for (i = 0; i < 5; ++i) {
+        AppendMenuW(menu, MF_STRING, fs_color_command(i), fs_color_names[i]);
+        if (i == 1) AppendMenuW(menu, MF_STRING, fs_color_command(6), fs_color_names[6]);
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, ID_MENU_COLOR_RESET, L"恢复默认");
     return menu;
@@ -1383,7 +1477,7 @@ static HMENU fs_create_preview_menu(void) {
 static int fs_save_color_mode(const FullscreenColorDraft *draft) {
     int previous_color, previous_scale, saved;
     wchar_t previous_font[32];
-    if (draft->index < 0 || draft->index >= 5) return 0;
+    if (draft->index < 0 || draft->index >= FS_COLOR_COUNT || draft->index == 5) return 0;
     if (g_settings_lock_ready) EnterCriticalSection(&g_settings_file_lock);
     previous_color = settings.fullscreen_colors[draft->index];
     previous_scale = settings.fullscreen_scales[draft->index];
@@ -1429,14 +1523,22 @@ static int fs_save_palette(const int *colors) {
     return saved;
 }
 
-static const wchar_t *fs_mode_sample_time(int index) {
-    switch (index) {
-        case 1: return L"05:00";
-        case 2: return L"03:12";
-        case 3: return L"10:00";
-        case 4: return L"+03:12";
-        default: return L"25:00";
-    }
+/* Same vocabulary and current state as real rendering; unrelated modes use safe examples. */
+static TimerUiView fs_preview_timer(int index) {
+    TimerUiView live = timer_ui_resolve();
+    if (index == 5) return live;
+    if ((index == 4 && live.overtime) || (!live.overtime && fs_mode_color(live.mode) == index)) return live;
+    TimerMode modes[FS_COLOR_COUNT] = {get_default_pomodoro_mode(), get_default_break_mode(), TIMER_COUNT_UP, TIMER_CUSTOM, TIMER_NONE, TIMER_NONE, TIMER_MICRO_BREAK};
+    TimerUiView sample = {modes[index], live.state, 0, index == 4};
+    if (sample.overtime && sample.state == TIMER_UI_READY) sample.state = TIMER_UI_RUNNING;
+    if (sample.overtime || sample.mode == TIMER_COUNT_UP) sample.seconds = sample.state == TIMER_UI_READY ? 0 : 192;
+    else if (sample.mode == TIMER_MICRO_BREAK) sample.seconds = settings.micro_break_duration_minutes * 60;
+    else sample.seconds = timer_ui_duration(sample.mode);
+    return sample;
+}
+static void fs_apply_mode_preview(FullscreenView *view, TimerUiView timer) {
+    timer_ui_status(view->status, 96, timer);
+    fs_format_time(view->time, 32, timer.seconds, timer.overtime);
 }
 
 static void fs_update_color_preview_font(HWND dialog, FullscreenColorDraft *draft) {
@@ -1448,7 +1550,9 @@ static void fs_update_color_preview_font(HWND dialog, FullscreenColorDraft *draf
         FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH, draft->font[0] ? draft->font : L"Segoe UI");
     SendMessageW(control, WM_SETFONT, (WPARAM)draft->preview_font, TRUE);
-    fs_update_local_preview(dialog, IDC_FS_PREVIEW_FIRST, fs_mode_sample_time(draft->index));
+    wchar_t preview_time[32];
+    fs_format_time(preview_time, 32, draft->preview_timer.seconds, draft->preview_timer.overtime);
+    fs_update_local_preview(dialog, IDC_FS_PREVIEW_FIRST, preview_time);
     InvalidateRect(control, NULL, TRUE);
 }
 
@@ -1472,6 +1576,8 @@ static INT_PTR CALLBACK FullscreenColorsDlgProc(HWND dialog, UINT msg, WPARAM wP
             wchar_t title[32], text[8];
             draft = (FullscreenColorDraft *)lParam;
             SetWindowLongPtrW(dialog, DWLP_USER, (LONG_PTR)draft);
+            fs_editor_dialog = dialog;
+            draft->preview_timer = fs_preview_timer(draft->index);
             swprintf(title, 32, L"%ls", fs_color_names[draft->index]);
             SetWindowTextW(dialog, title);
             fs_populate_font_combo(GetDlgItem(dialog, IDC_FS_FONT_FIRST), fs_mode_fonts, FS_MODE_FONT_COUNT, draft->font);
@@ -1525,8 +1631,7 @@ static INT_PTR CALLBACK FullscreenColorsDlgProc(HWND dialog, UINT msg, WPARAM wP
                 view.scale = draft->scale;
                 wcscpy(view.font, draft->font);
                 view.show_text = 1;
-                wcscpy(view.status, fs_color_names[draft->index]);
-                wcscpy(view.time, fs_mode_sample_time(draft->index));
+                fs_apply_mode_preview(&view, draft->preview_timer);
                 fs_start_preview(dialog, IDC_FS_EDIT_FIRST, &view);
                 return TRUE;
             }
@@ -1555,6 +1660,7 @@ static INT_PTR CALLBACK FullscreenColorsDlgProc(HWND dialog, UINT msg, WPARAM wP
             break;
         case WM_CLOSE: EndDialog(dialog, IDCANCEL); return TRUE;
         case WM_DESTROY:
+            if (fs_editor_dialog == dialog) fs_editor_dialog = NULL;
             if (draft && draft->preview_font) { DeleteObject(draft->preview_font); draft->preview_font = NULL; }
             break;
     }
