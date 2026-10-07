@@ -1,4 +1,4 @@
-param([switch]$Interactive, [switch]$Stress, [switch]$UiCopyOnly, [switch]$ReadyOnly, [switch]$UxOnly, [switch]$FlexibleOnly, [switch]$MicroPreviewOnly, [switch]$SurfaceOnly, [switch]$ClickOnly)
+﻿param([switch]$Interactive, [switch]$Stress, [switch]$UiCopyOnly, [switch]$ReadyOnly, [switch]$UxOnly, [switch]$FlexibleOnly, [switch]$MicroPreviewOnly, [switch]$SurfaceOnly, [switch]$ClickOnly, [switch]$WaitOvertimeOnly, [switch]$StrongOnly, [switch]$ReminderMenuOnly, [switch]$ConsistencyOnly, [switch]$ReliabilityOnly, [switch]$TrayLayoutOnly, [switch]$VisualOnly, [switch]$RepairOnly)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -23,6 +23,14 @@ try {
     if ($MicroPreviewOnly) { $testArgs += '--micro-preview-only' }
     if ($SurfaceOnly) { $testArgs += '--surface-only' }
     if ($ClickOnly) { $testArgs += '--click-only' }
+    if ($WaitOvertimeOnly) { $testArgs += '--wait-overtime-only' }
+    if ($StrongOnly) { $testArgs += '--strong-only' }
+    if ($ReminderMenuOnly) { $testArgs += '--reminder-menu-only' }
+    if ($ConsistencyOnly) { $testArgs += '--consistency-only' }
+    if ($ReliabilityOnly) { $testArgs += '--reliability-only' }
+    if ($TrayLayoutOnly) { $testArgs += '--tray-layout-only' }
+    if ($VisualOnly) { $testArgs += '--visual-only' }
+    if ($RepairOnly) { $testArgs += '--repair-only' }
     $process = Start-Process -FilePath (Join-Path $runPath 'fullscreen_test.exe') -ArgumentList $testArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $runPath 'results.txt') -RedirectStandardError (Join-Path $runPath 'errors.txt')
     if (-not $process.WaitForExit(45000)) {
         Stop-Process -Id $process.Id -Force
@@ -34,7 +42,7 @@ try {
     Get-Content -LiteralPath (Join-Path $runPath 'errors.txt')
     Write-Host "Test artifacts: $projectRoot\$runPath"
     if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) { throw "Integration tests failed: $($process.ExitCode)" }
-    $passPattern = if ($ClickOnly) { 'FULLSCREEN_CLICK_TEST: PASS \(0 failures\)' } elseif ($SurfaceOnly) { 'SURFACE_BUG_TEST: PASS \(0 failures\)' } elseif ($MicroPreviewOnly) { 'MICRO_PREVIEW_TEST: PASS \(0 failures\)' } elseif ($FlexibleOnly) { 'FLEXIBLE_CONTROLS_TEST: PASS \(0 failures\)' } elseif ($UxOnly) { 'UX_CONSISTENCY_TEST: PASS \(0 failures\)' } elseif ($ReadyOnly) { 'READY_STATE_TEST: PASS \(0 failures\)' } elseif ($UiCopyOnly) { 'UI_COPY_TEST: PASS \(0 failures\)' } else { 'FULLSCREEN_TEST: PASS \(0 failures\)' }
+    $passPattern = if ($RepairOnly) { 'GUI_REPAIR_TEST: PASS \(0 failures\)' } elseif ($VisualOnly) { 'VISUAL_STABILITY_TEST: PASS \(0 failures\)' } elseif ($TrayLayoutOnly) { 'TRAY_LAYOUT_TEST: PASS \(0 failures\)' } elseif ($ReliabilityOnly) { 'RELIABILITY_TEST: PASS \(0 failures\)' } elseif ($ConsistencyOnly) { 'SESSION_CONSISTENCY_TEST: PASS \(0 failures\)' } elseif ($ReminderMenuOnly) { 'REMINDER_MENU_TEST: PASS \(0 failures\)' } elseif ($StrongOnly) { 'STRONG_REMINDER_TEST: PASS \(0 failures\)' } elseif ($WaitOvertimeOnly) { 'MICRO_WAIT_OVERTIME_TEST: PASS \(0 failures\)' } elseif ($ClickOnly) { 'FULLSCREEN_CLICK_TEST: PASS \(0 failures\)' } elseif ($SurfaceOnly) { 'SURFACE_BUG_TEST: PASS \(0 failures\)' } elseif ($MicroPreviewOnly) { 'MICRO_PREVIEW_TEST: PASS \(0 failures\)' } elseif ($FlexibleOnly) { 'FLEXIBLE_CONTROLS_TEST: PASS \(0 failures\)' } elseif ($UxOnly) { 'UX_CONSISTENCY_TEST: PASS \(0 failures\)' } elseif ($ReadyOnly) { 'READY_STATE_TEST: PASS \(0 failures\)' } elseif ($UiCopyOnly) { 'UI_COPY_TEST: PASS \(0 failures\)' } else { 'FULLSCREEN_TEST: PASS \(0 failures\)' }
     if (-not ($results -match $passPattern)) { throw 'Integration tests failed.' }
 } finally {
     Pop-Location

@@ -1,19 +1,20 @@
 /* Focused v2.5.39 regressions: actual timer engine and native overlay windows. */
-static void test_micro_case(int minutes, int extension, int expected) {
-    int k, total = minutes * 60 + extension;
+static void test_micro_case(int minutes, int wait_seconds, int expected) {
+    int k, total = minutes * 60;
     timer_test_reset();
     start_timer(g_main_hwnd, minutes, TIMER_SHORT_POMODORO);
     timer_advance_seconds(g_main_hwnd, 900);
-    CHECK(micro.phase == MICRO_WAIT_START && timer_tick_handled(1), "original first tick triggers");
-    timer_advance_seconds(g_main_hwnd, extension);
-    CHECK(micro.extension_seconds == extension, "only waiting overtime extends parent");
+    CHECK(micro.phase == MICRO_WAIT_START && (micro.frozen_seconds == micro.base_seconds - micro.interval_seconds), "original first tick triggers");
     for (k = 1; k <= expected; ++k) {
-        CHECK(micro.phase == MICRO_WAIT_START && micro.triggered_count == k && overtime_seconds == total-k*900,
-            "eligible original or extension tick triggers exactly once at shifted value");
+        int frozen = total-k*900;
+        CHECK(micro.phase == MICRO_WAIT_START && overtime_seconds == 0 && micro.frozen_seconds == frozen,
+            "each original tick starts independent overtime at zero");
+        timer_advance_seconds(g_main_hwnd, wait_seconds);
+        CHECK(overtime_seconds == wait_seconds && remaining_seconds == frozen && micro.frozen_seconds == frozen,
+            "waiting changes only elapsed overtime, never parent time or schedule");
         timer_primary_action(g_main_hwnd);
-        int frozen = micro.frozen_seconds;
         timer_advance_seconds(g_main_hwnd, 61);
-        CHECK(micro.frozen_seconds == frozen && micro.extension_seconds == extension, "micro expiry overtime does not extend parent");
+        CHECK(micro.frozen_seconds == frozen && overtime_seconds == 1, "micro expiry overtime remains independent");
         timer_primary_action(g_main_hwnd);
         CHECK(remaining_seconds == frozen && current_timer_mode == TIMER_SHORT_POMODORO, "resume retains frozen parent time");
         if (k < expected) timer_advance_seconds(g_main_hwnd, 900);
@@ -29,21 +30,13 @@ static void test_micro_preview(void) {
     FullscreenView view;
     settings.enable_micro_break = 1; settings.micro_break_interval_minutes = 15; settings.micro_break_duration_minutes = 1;
     settings.enable_overtime_count_up = 1; settings.enable_pomodoro_count = 0;
-    settings.enable_clock_sound = settings.enable_completion_sound = settings.show_completion_dialog = 0;
-    test_micro_case(40,0,2); test_micro_case(40,1199,2); test_micro_case(40,1200,3);
-    test_micro_case(40,2099,3); test_micro_case(40,2100,4);
+    settings.enable_clock_sound = settings.enable_completion_sound = settings.reminder_mode = 0;
+    test_micro_case(40,0,2); test_micro_case(40,1199,2); test_micro_case(40,1200,2);
+    test_micro_case(40,2099,2); test_micro_case(40,2100,2);
     test_micro_case(45,0,2); test_micro_case(50,0,3);
     timer_test_reset(); start_timer(g_main_hwnd,40,TIMER_SHORT_POMODORO);
-    timer_advance_seconds(g_main_hwnd,1500); /* first waiting point gains ten minutes */
-    timer_primary_action(g_main_hwnd); timer_stop_action(g_main_hwnd); timer_primary_action(g_main_hwnd);
-    timer_advance_seconds(g_main_hwnd,1500); /* second waiting point gains another ten */
-    CHECK(micro.extension_seconds==1200 && overtime_seconds==1800 && micro.triggered_count==2,"extension accumulates across multiple waiting points");
-    timer_primary_action(g_main_hwnd); timer_stop_action(g_main_hwnd); timer_primary_action(g_main_hwnd);
-    timer_advance_seconds(g_main_hwnd,900);
-    CHECK(micro.phase==MICRO_WAIT_START && micro.triggered_count==3 && overtime_seconds==900,"cumulative extension adds third tick without repeating earlier ordinals");
-    timer_test_reset(); start_timer(g_main_hwnd,40,TIMER_SHORT_POMODORO);
     remaining_seconds=1200; timer_advance_seconds(g_main_hwnd,600);
-    CHECK(micro.phase==MICRO_WAIT_START && micro.triggered_count==1 && timer_tick_handled(2) && micro.extension_seconds==0,"manual skip retains original tail without catch-up or extension");
+    CHECK(micro.phase==MICRO_WAIT_START && (micro.frozen_seconds == micro.base_seconds - 2 * micro.interval_seconds),"manual skip retains original tail without catch-up or extension");
     timer_test_reset(); start_timer(g_main_hwnd,40,TIMER_SHORT_POMODORO);
     remaining_seconds=600; timer_advance_seconds(g_main_hwnd,1);
     CHECK(micro.phase==MICRO_NONE,"manual setting exactly at tail tick does not trigger");

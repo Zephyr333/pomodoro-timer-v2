@@ -5,8 +5,10 @@
 #include <windows.h>
 #include <string.h>
 #include <mmsystem.h>
-static int test_silent_sound;
+#include <shellapi.h>
+static int test_silent_sound, test_one_shot_sound_count;
 static BOOL WINAPI test_play_sound_a(LPCSTR sound, HMODULE module, DWORD flags) {
+    if(test_silent_sound && sound && !(flags & SND_LOOP)) ++test_one_shot_sound_count;
     return test_silent_sound ? TRUE : PlaySoundA(sound,module,flags);
 }
 static BOOL WINAPI test_play_sound_w(LPCWSTR sound, HMODULE module, DWORD flags) {
@@ -14,6 +16,26 @@ static BOOL WINAPI test_play_sound_w(LPCWSTR sound, HMODULE module, DWORD flags)
 }
 #define PlaySoundA test_play_sound_a
 #define PlaySoundW test_play_sound_w
+static int test_notify_stub,test_notify_failures,test_notify_calls;
+static BOOL WINAPI test_shell_notify(DWORD message,PNOTIFYICONDATAW data) {
+    if(test_notify_stub){++test_notify_calls;if(test_notify_failures>0){--test_notify_failures;return FALSE;}return TRUE;}
+    return Shell_NotifyIconW(message,data);
+}
+#define Shell_NotifyIconW test_shell_notify
+static HWND test_timer_owner;
+static int test_timer_tracking;
+static unsigned test_main_timers;
+static UINT_PTR WINAPI test_set_timer(HWND owner,UINT_PTR id,UINT interval,TIMERPROC proc) {
+    UINT_PTR result=SetTimer(owner,id,interval,proc);
+    if(result && test_timer_tracking && owner==test_timer_owner && id>=4001 && id<=4010)test_main_timers|=1u<<(id-4001);
+    return result;
+}
+static BOOL WINAPI test_kill_timer(HWND owner,UINT_PTR id) {
+    if(test_timer_tracking && owner==test_timer_owner && id>=4001 && id<=4010)test_main_timers&=~(1u<<(id-4001));
+    return KillTimer(owner,id);
+}
+#define SetTimer test_set_timer
+#define KillTimer test_kill_timer
 static int test_tray_rect_enabled;
 static RECT test_tray_rect;
 static int test_tray_rect_queries;
@@ -52,8 +74,34 @@ static HHOOK WINAPI test_install_hook(int type, HOOKPROC callback, HINSTANCE mod
     return SetWindowsHookExW(type, callback, module, thread);
 }
 #define SetWindowsHookExW test_install_hook
+static int test_fail_strong_window,test_fail_strong_after;
+static HWND WINAPI test_create_window_ex(DWORD ex, LPCWSTR cls, LPCWSTR title, DWORD style,
+    int x,int y,int width,int height,HWND parent,HMENU menu,HINSTANCE instance,LPVOID parameter) {
+    if((UINT_PTR)cls>65535 && !wcscmp(cls,L"PomodoroStrongReminder")) {
+        if(test_fail_strong_window || (test_fail_strong_after>0 && --test_fail_strong_after==0))return NULL;
+    }
+    return CreateWindowExW(ex,cls,title,style,x,y,width,height,parent,menu,instance,parameter);
+}
+#define CreateWindowExW test_create_window_ex
+static int test_visual_z_tracking, test_visual_z_violations,test_repair_z_tracking;
+static void test_repair_z_observe(void);
+static void test_visual_z_observe(void);
+static BOOL WINAPI test_visual_window_pos(HWND w,HWND after,int x,int y,int cx,int cy,UINT flags) {
+    BOOL result=SetWindowPos(w,after,x,y,cx,cy,flags);
+    if(result && (test_visual_z_tracking||test_repair_z_tracking))test_visual_z_observe();
+    return result;
+}
+#define SetWindowPos test_visual_window_pos
+static BOOL WINAPI test_visual_show_window(HWND w,int cmd) {
+    BOOL result=ShowWindow(w,cmd);if(test_visual_z_tracking||test_repair_z_tracking)test_visual_z_observe();return result;
+}
+static BOOL WINAPI test_visual_foreground(HWND w) {
+    BOOL result=SetForegroundWindow(w);if(test_visual_z_tracking||test_repair_z_tracking)test_visual_z_observe();return result;
+}
+#define ShowWindow test_visual_show_window
+#define SetForegroundWindow test_visual_foreground
 #define POMODORO_TEST_IO 1
-static int test_io_active;
+static int test_io_active, test_fail_stats_commit;
 static wchar_t test_io_root[MAX_PATH], test_io_folder[MAX_PATH];
 static int WINAPI test_io_message(HWND owner, LPCWSTR text, LPCWSTR title, UINT flags) {
     if (test_io_active) return (flags & MB_TYPEMASK) == MB_YESNO ? IDYES : IDOK;
@@ -71,33 +119,33 @@ static int overlay_destroyed;
 
 static int menu_request;
 static BOOL WINAPI test_track_popup_menu(HMENU menu, UINT flags, int x, int y, int reserved, HWND owner, const RECT *rect) {
-    const wchar_t *labels[] = {L"会话", L"切换", L"待机", L"", L"全屏", L"预览", L"", L"调整", L"时长", L"偏好", L"", L"存储", L"备份", L"", L"统计", L"", L"退出"};
+    const wchar_t *labels[] = {L"会话", L"切换", L"待机", L"", L"全屏", L"预览", L"", L"调整", L"时长", L"提醒", L"偏好", L"", L"存储", L"备份", L"", L"统计", L"", L"退出"};
     int i, j;
     wchar_t label[80];
     HMENU session = GetSubMenu(menu, 0), fullscreen = GetSubMenu(menu, 4), preview = GetSubMenu(menu, 5);
     (void)flags; (void)x; (void)y; (void)reserved; (void)owner; (void)rect;
-    CHECK(GetMenuItemCount(menu) == 17, "root menu includes grouped items with separators");
-    for (i = 0; i < 17; ++i) {
+    CHECK(GetMenuItemCount(menu) == 18, "root menu includes grouped items with separators");
+    for (i = 0; i < 18; ++i) {
         HMENU child = GetSubMenu(menu, i);
         GetMenuStringW(menu, i, label, 80, MF_BYPOSITION);
         CHECK(!wcscmp(label, labels[i]), "root ordering matches grouped layout");
         if (child) for (j = 0; j < GetMenuItemCount(child); ++j)
             CHECK(GetSubMenu(child, j) == NULL, "menu depth does not exceed two levels");
     }
-    CHECK(GetMenuItemCount(session) == 3, "fullscreen moved out of session menu");
+    CHECK(GetMenuItemCount(session) == 2, "fullscreen moved out of session menu");
     { int commands[]={ID_MENU_IDLE_POMODORO,ID_MENU_IDLE_SHORT_POMODORO,ID_MENU_IDLE_SHORT_BREAK,ID_MENU_IDLE_LONG_BREAK,ID_MENU_IDLE_COUNT_UP,ID_MENU_IDLE_CUSTOM};
       int n;HMENU idle=GetSubMenu(menu,2);
       for(n=0;n<6;++n) CHECK(!(GetMenuState(idle,commands[n],MF_BYCOMMAND)&MF_GRAYED),"idle menu disables current selection and active-state choices");
-      HMENU prefs=GetSubMenu(menu,9);int defaults[]={ID_MENU_DEFAULT_LONG_POMODORO,ID_MENU_DEFAULT_SHORT_POMODORO,ID_MENU_DEFAULT_LONG_BREAK,ID_MENU_DEFAULT_SHORT_BREAK};
+      HMENU prefs=GetSubMenu(menu,10);int defaults[]={ID_MENU_DEFAULT_LONG_POMODORO,ID_MENU_DEFAULT_SHORT_POMODORO,ID_MENU_DEFAULT_LONG_BREAK,ID_MENU_DEFAULT_SHORT_BREAK};
       for(n=0;n<4;++n) CHECK(!(GetMenuState(prefs,defaults[n],MF_BYCOMMAND)&MF_GRAYED),"default menu disables selected choice");
     }
     GetMenuStringW(session, ID_MENU_START_CURRENT, label, 80, MF_BYCOMMAND);
-    CHECK(!wcscmp(label, L"开始"), "session start wording is stable");
+    CHECK(!wcscmp(label, timer_ui_primary_label()), "session primary wording matches actual action");
     GetMenuStringW(session, ID_MENU_PAUSE_RESUME, label, 80, MF_BYCOMMAND);
     CHECK(!wcscmp(label, timer_ui_pause_label()), "session pause label follows actual pause state");
     CHECK(!!(GetMenuState(session, ID_MENU_START_CURRENT, MF_BYCOMMAND) & MF_GRAYED) == !timer_ui_can_start(), "start availability is shared");
     CHECK(!!(GetMenuState(session, ID_MENU_PAUSE_RESUME, MF_BYCOMMAND) & MF_GRAYED) == !timer_ui_can_pause(), "pause availability is shared");
-    CHECK(!!(GetMenuState(session, ID_MENU_STOP, MF_BYCOMMAND) & MF_GRAYED) == !timer_ui_can_end(), "end availability is shared");
+    CHECK(GetMenuState(session,ID_MENU_STOP,MF_BYCOMMAND)==(UINT)-1,"no duplicate standalone end command");
     CHECK(GetMenuItemID(fullscreen, 0) == ID_MENU_FULLSCREEN, "all screens directly accessible");
     CHECK(GetMenuItemID(fullscreen, 1) == ID_MENU_FULLSCREEN_EXIT, "exit directly accessible");
     CHECK(!!(GetMenuState(fullscreen, ID_MENU_FULLSCREEN_EXIT, MF_BYCOMMAND) & MF_GRAYED) == !fs_active, "exit enabled only while fullscreen");
@@ -105,7 +153,7 @@ static BOOL WINAPI test_track_popup_menu(HMENU menu, UINT flags, int x, int y, i
     CHECK(!wcscmp(label, L"显示模式"), "state visibility has concise unambiguous label");
     GetMenuStringW(fullscreen, ID_MENU_FULLSCREEN_SHOW_MOUSE_TIPS, label, 80, MF_BYCOMMAND);
     CHECK(!wcscmp(label, L"显示鼠标提示"), "mouse tips visibility has concise unambiguous label");
-    CHECK(GetMenuState(GetSubMenu(menu, 9), ID_MENU_FULLSCREEN_SHOW_TEXT, MF_BYCOMMAND) == (UINT)-1, "fullscreen state removed from preferences");
+    CHECK(GetMenuState(GetSubMenu(menu, 10), ID_MENU_FULLSCREEN_SHOW_TEXT, MF_BYCOMMAND) == (UINT)-1, "fullscreen state removed from preferences");
     for (i = 0; i < (int)fs_menu_monitors.count; ++i)
         CHECK(!!(GetMenuState(fullscreen, ID_MENU_SCREEN_FIRST + i, MF_BYCOMMAND) & MF_CHECKED) ==
             (fs_window_index(fs_menu_monitors.items[i].identity) >= 0), "screen checkmark represents real active window");
@@ -124,12 +172,18 @@ static BOOL WINAPI test_track_popup_menu(HMENU menu, UINT flags, int x, int y, i
     CHECK(GetMenuItemID(preview, 8) == 0, "separator precedes reset");
     CHECK(GetMenuItemID(preview, 9) == ID_MENU_COLOR_RESET, "color reset is directly accessible");
     {
-        HMENU adjust = GetSubMenu(menu, 7), duration = GetSubMenu(menu, 8), preference = GetSubMenu(menu, 9);
+        HMENU adjust = GetSubMenu(menu, 7), duration = GetSubMenu(menu, 8), reminder = GetSubMenu(menu, 9), preference = GetSubMenu(menu, 10);
         int commands[] = {ID_MENU_SET_TIME, ID_MENU_PLUS_5_MIN, ID_MENU_MINUS_5_MIN};
         for (i = 0; i < 3; ++i)
             CHECK(!!(GetMenuState(adjust, commands[i], MF_BYCOMMAND) & MF_GRAYED) == !timer_can_edit_time(), "time menu matches stage edit permission");
-        CHECK(!!(GetMenuState(duration, ID_MENU_SET_TOAST_COLLAPSE_SECONDS, MF_BYCOMMAND) & MF_GRAYED) == !settings.show_completion_dialog, "collapse menu follows popup setting");
-        CHECK(GetMenuItemID(preference, 2) == 9 && GetMenuItemID(preference, 3) == ID_MENU_ENABLE_MICRO_BREAK && GetMenuItemID(preference, 4) == ID_MENU_ENABLE_POMODORO_COUNT, "micro preference is between popup and count");
+        CHECK(!!(GetMenuState(reminder, ID_MENU_SET_TOAST_COLLAPSE_SECONDS, MF_BYCOMMAND) & MF_GRAYED) == (settings.reminder_mode != 1), "collapse menu follows popup setting");
+        CHECK(GetMenuItemCount(reminder)==6 && GetMenuItemID(reminder,0)==ID_MENU_REMINDER_OFF && GetMenuItemID(reminder,1)==ID_MENU_REMINDER_POPUP && GetMenuItemID(reminder,2)==ID_MENU_REMINDER_STRONG && GetMenuItemID(reminder,3)==0 && GetMenuItemID(reminder,4)==ID_MENU_COMPLETION_SOUND && GetMenuItemID(reminder,5)==ID_MENU_SET_TOAST_COLLAPSE_SECONDS,"five reminder actions grouped in their own second-level menu");
+        for(i=0;i<3;++i) {
+            UINT state=GetMenuState(reminder,ID_MENU_REMINDER_OFF+i,MF_BYCOMMAND);
+            CHECK(!(state & MF_GRAYED) && !!(state & MF_CHECKED)==(settings.reminder_mode==i),"one reminder choice checked with all choices enabled");
+            CHECK(GetMenuState(preference,ID_MENU_REMINDER_OFF+i,MF_BYCOMMAND)==(UINT)-1,"reminder choices removed from preferences");
+        }
+        CHECK(GetMenuState(duration,ID_MENU_SET_TOAST_COLLAPSE_SECONDS,MF_BYCOMMAND)==(UINT)-1 && GetMenuState(preference,ID_MENU_COMPLETION_SOUND,MF_BYCOMMAND)==(UINT)-1,"collapse and completion sound appear only in reminder menu");
         int rules[] = {ID_MENU_ENABLE_MICRO_BREAK, ID_MENU_ENABLE_OVERTIME, ID_MENU_ENABLE_POMODORO_COUNT};
         for (i = 0; i < 3; ++i)
             CHECK(!!(GetMenuState(preference, rules[i], MF_BYCOMMAND) & MF_GRAYED) == !!timer_setting_locked(rules[i]), "preference menu matches per-mode rule locks");
@@ -154,16 +208,21 @@ static LRESULT CALLBACK trace_window_messages(int code, WPARAM sent, LPARAM valu
         CWPSTRUCT *message = (CWPSTRUCT *)value;
         wchar_t name[64];
         GetClassNameW(message->hwnd, name, 64);
+        if(test_visual_z_tracking && (!wcscmp(name,L"PomodoroFullscreenTestMain")) &&
+            (message->message==WM_COMMAND || message->message==WM_CLOSE || message->message==WM_DESTROY))
+            printf("Visual main input: message=0x%04X command=%llu\n",message->message,(unsigned long long)message->wParam);
         if (!wcscmp(name, L"PomodoroFullscreen")) {
             if (message->message == WM_CREATE) ++overlay_created;
             if (message->message == WM_DESTROY) ++overlay_destroyed;
         }
-        if (!wcscmp(name, L"PomodoroFullscreen") &&
+        if ((!wcscmp(name, L"PomodoroFullscreen") || !wcscmp(name,L"PomodoroStrongReminder")) &&
             (message->message == WM_LBUTTONDOWN || message->message == WM_RBUTTONDOWN ||
              message->message == WM_MBUTTONDOWN || message->message == WM_XBUTTONDOWN ||
              message->message == WM_KEYDOWN || message->message == WM_CLOSE))
             printf("Overlay input: message=0x%04X wParam=%llu sent=%llu\n", message->message,
                 (unsigned long long)message->wParam, (unsigned long long)sent);
+        if ((!wcscmp(name,L"PomodoroFullscreen")||!wcscmp(name,L"PomodoroStrongReminder")) && (message->message==WM_DESTROY||message->message==WM_DISPLAYCHANGE||message->message==0x02E0))
+            printf("Visual lifecycle %ls: message=0x%04X fs=%zu sr=%zu\n",name,message->message,fs_count,sr.count);
     }
     return CallNextHookEx(NULL, code, sent, value);
 }
@@ -670,6 +729,26 @@ static void test_signature(void) {
 #include "micro_preview_test.h"
 #include "surface_bug_test.h"
 #include "fullscreen_click_test.h"
+#include "micro_wait_overtime_test.h"
+#include "strong_reminder_test.h"
+#include "session_consistency_test.h"
+#include "reliability_test.h"
+#include "visual_stability_test.h"
+#include "gui_repair_test.h"
+
+static void test_reminder_menu(void) {
+    TimerSettings saved=settings;
+    timer_test_reset();
+    choose_menu(ID_MENU_REMINDER_OFF);choose_menu(ID_MENU_REMINDER_POPUP);choose_menu(ID_MENU_REMINDER_STRONG);
+    CHECK(settings.reminder_mode==2,"moved reminder commands still select intended mode");
+    choose_menu(ID_MENU_REMINDER_POPUP);
+    int sound=settings.enable_completion_sound;choose_menu(ID_MENU_COMPLETION_SOUND);
+    CHECK(settings.enable_completion_sound!=sound,"moved sound command remains functional");choose_menu(ID_MENU_COMPLETION_SOUND);
+    int collapse=settings.enable_toast_auto_collapse;choose_menu(ID_MENU_SET_TOAST_COLLAPSE_SECONDS);
+    CHECK(settings.enable_toast_auto_collapse!=collapse,"moved collapse checkbox remains functional");
+    settings=saved;save_settings();
+    printf("REMINDER_MENU_TEST: %s (%d failures)\n",failures ? "FAIL" : "PASS",failures);
+}
 
 int wmain(int argc, wchar_t **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -682,7 +761,7 @@ int wmain(int argc, wchar_t **argv) {
     HANDLE old_dpi;
     HHOOK trace_hook;
     HDESK test_desktop = NULL;
-    int interactive = 0, stress = 0, ui_copy_only = 0, ready_only = 0, ux_only = 0, flexible_only = 0, micro_preview_only = 0, surface_only = 0, click_only = 0;
+    int interactive = 0, stress = 0, ui_copy_only = 0, ready_only = 0, ux_only = 0, flexible_only = 0, micro_preview_only = 0, surface_only = 0, click_only = 0, wait_overtime_only = 0, strong_only = 0, reminder_menu_only = 0, consistency_only = 0, reliability_only = 0, tray_layout_only = 0, visual_only = 0, repair_only = 0;
     if (argc < 2 || wcsncmp(argv[1], L"tools\\.fullscreen-test\\", 23) != 0 || wcsstr(argv[1], L"..")) {
         /* Require the script's relative output path, not a personal data path. */
         fprintf(stderr, "Usage: fullscreen_test.exe tools\\.fullscreen-test\\run-id\n"); return 2;
@@ -697,6 +776,14 @@ int wmain(int argc, wchar_t **argv) {
         if (!wcscmp(argv[i], L"--micro-preview-only")) micro_preview_only = 1;
         if (!wcscmp(argv[i], L"--surface-only")) surface_only = 1;
         if (!wcscmp(argv[i], L"--click-only")) click_only = 1;
+        if (!wcscmp(argv[i], L"--wait-overtime-only")) wait_overtime_only = 1;
+        if (!wcscmp(argv[i], L"--strong-only")) strong_only = 1;
+        if (!wcscmp(argv[i], L"--reminder-menu-only")) reminder_menu_only = 1;
+        if (!wcscmp(argv[i], L"--consistency-only")) consistency_only = 1;
+        if (!wcscmp(argv[i], L"--reliability-only")) reliability_only = 1;
+        if (!wcscmp(argv[i], L"--tray-layout-only")) tray_layout_only = 1;
+        if (!wcscmp(argv[i], L"--visual-only")) visual_only = 1;
+        if (!wcscmp(argv[i], L"--repair-only")) repair_only = 1;
     }
     if (!interactive) {
         wchar_t desktop_name[80];
@@ -728,8 +815,8 @@ int wmain(int argc, wchar_t **argv) {
     trace_hook = SetWindowsHookExW(WH_CALLWNDPROC, trace_window_messages, NULL, GetCurrentThreadId());
     CHECK(trace_hook != NULL, "window lifecycle observer installed");
 
-    if (ui_copy_only || ready_only || ux_only || flexible_only || micro_preview_only || surface_only || click_only) {
-        if (click_only) test_fullscreen_clicks(); else if (surface_only) test_surface_bugs(); else if (micro_preview_only) test_micro_preview(); else if (flexible_only) test_flexible_controls(); else if (ux_only) test_ux_consistency(); else if (ready_only) test_ready_states(); else test_ui_copy();
+    if (ui_copy_only || ready_only || ux_only || flexible_only || micro_preview_only || surface_only || click_only || wait_overtime_only || strong_only || reminder_menu_only || consistency_only || reliability_only || tray_layout_only || visual_only || repair_only) {
+        if(repair_only)test_gui_repairs(); else if(visual_only){visual_live_desktop=interactive;test_visual_stability();} else if(tray_layout_only){TimerSettings saved=settings;consistency_reset();reliability_icon_sheet();settings=saved;printf("TRAY_LAYOUT_TEST: %s (%d failures)\n",failures ? "FAIL" : "PASS",failures);} else if (reliability_only) test_reliability(); else if (consistency_only) test_session_consistency(); else if (reminder_menu_only) test_reminder_menu(); else if (strong_only) test_strong_reminder(); else if (wait_overtime_only) test_micro_wait_overtime(); else if (click_only) test_fullscreen_clicks(); else if (surface_only) test_surface_bugs(); else if (micro_preview_only) test_micro_preview(); else if (flexible_only) test_flexible_controls(); else if (ux_only) test_ux_consistency(); else if (ready_only) test_ready_states(); else test_ui_copy();
         if (trace_hook) UnhookWindowsHookEx(trace_hook);
         DestroyWindow(g_main_hwnd);
         if (test_desktop) CloseDesktop(test_desktop);
@@ -861,7 +948,7 @@ int wmain(int argc, wchar_t **argv) {
     choose_menu(ID_MENU_FULLSCREEN); CHECK(fs_active, "all screens menu is idempotent");
     choose_menu(ID_MENU_FULLSCREEN_EXIT); CHECK(!fs_active, "exit fullscreen menu exits all windows");
 
-    settings.enable_clock_sound = 0; settings.enable_completion_sound = 0; settings.show_completion_dialog = 1;
+    settings.enable_clock_sound = 0; settings.enable_completion_sound = 0; settings.reminder_mode = 1;
     settings.enable_overtime_count_up = 1;
     fs_show_all(); start_timer(g_main_hwnd, 0, TIMER_CUSTOM); pump(1250);
     CHECK(is_overtime && is_running && fs_active && fs_view.time[0] == L'+', "real timer completes into fullscreen overtime");
@@ -876,7 +963,7 @@ int wmain(int argc, wchar_t **argv) {
         puts("Steady fullscreen: 3.5 seconds, no overlay creation or destruction.");
     }
     stop_timer_clock(); clear_overtime_state(); fs_exit();
-    settings.enable_overtime_count_up = 0; settings.show_completion_dialog = 0;
+    settings.enable_overtime_count_up = 0; settings.reminder_mode = 0;
     fs_show_all(); start_timer(g_main_hwnd, 0, TIMER_CUSTOM); pump(200);
     CHECK(!is_running && fs_active && !wcscmp(fs_view.time, L"10:00") && !wcscmp(fs_view.status, L"自定义计时 · 未开始"), "completion remains visible even with toast disabled");
     stop_timer_clock(); fs_exit();

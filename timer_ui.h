@@ -40,8 +40,7 @@ static TimerUiView timer_ui_resolve(void) {
     } else if (is_running || is_paused) {
         view.state = is_paused ? TIMER_UI_PAUSED : TIMER_UI_RUNNING;
     } else {
-        if (completed_pending_mode != TIMER_NONE) view.mode = timer_next_mode(completed_pending_mode);
-        else if (idle_mode == IDLE_BREAK) view.mode = idle_break_is_long ? TIMER_LONG_BREAK : TIMER_SHORT_BREAK;
+        if (idle_mode == IDLE_BREAK) view.mode = idle_break_is_long ? TIMER_LONG_BREAK : TIMER_SHORT_BREAK;
         else if (idle_mode == IDLE_COUNT_UP) view.mode = TIMER_COUNT_UP;
         else if (idle_mode == IDLE_CUSTOM) view.mode = TIMER_CUSTOM;
         else view.mode = idle_pomodoro_is_long ? TIMER_LONG_POMODORO : TIMER_SHORT_POMODORO;
@@ -62,13 +61,12 @@ static int timer_ui_selection_locked(int command) {
 
 }
 static int timer_ui_is_ready(void) { return timer_ui_resolve().state == TIMER_UI_READY; }
-static int timer_ui_can_start(void) { return is_overtime || timer_ui_is_ready(); }
+static int timer_ui_can_start(void) { return 1; }
 static int timer_ui_can_pause(void) { return !timer_ui_is_ready(); }
 static int timer_ui_can_end(void) { return !timer_ui_is_ready(); }
 static const wchar_t *timer_ui_pause_label(void) { return is_paused ? L"继续" : L"暂停"; }
 static const wchar_t *timer_ui_primary_label(void) {
-    if (timer_ui_can_start()) return L"开始";
-    return is_paused ? L"继续" : L"结束";
+    return is_overtime || timer_ui_is_ready() ? L"开始" : L"结束";
 }
 static void timer_ui_status(wchar_t *out, size_t capacity, TimerUiView view) {
     const wchar_t *suffix = view.state == TIMER_UI_READY ? L" · 未开始" : view.state == TIMER_UI_PAUSED ? L" · 已暂停" : L"";

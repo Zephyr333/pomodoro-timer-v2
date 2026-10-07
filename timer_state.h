@@ -2,7 +2,7 @@
 #define POMODORO_TIMER_STATE_H
 
 /* Included after the existing mode-start helpers. No worker mutates these values. */
-static void clear_micro_state(void) { free(micro.triggered); memset(&micro, 0, sizeof(micro)); }
+static void clear_micro_state(void) { memset(&micro, 0, sizeof(micro)); }
 
 static int timer_session_active(void) {
     return is_running || is_paused || micro.phase != MICRO_NONE;
@@ -29,7 +29,7 @@ static int timer_setting_locked(int command) {
         case ID_MENU_SET_TIME:
         case ID_MENU_PLUS_5_MIN:
         case ID_MENU_MINUS_5_MIN: return !timer_can_edit_time();
-        case ID_MENU_SET_TOAST_COLLAPSE_SECONDS: return !settings.show_completion_dialog;
+        case ID_MENU_SET_TOAST_COLLAPSE_SECONDS: return settings.reminder_mode != 1;
         default: return 0;
     }
 }
@@ -46,11 +46,9 @@ static int timer_correct_today_count(HWND hwnd, int count) {
 static void timer_apply_live_preferences(void) {
     if (!settings.enable_clock_sound) stop_clock_loop_sound();
     else if (is_running && !is_overtime) start_clock_loop_sound();
-    if (!settings.show_completion_dialog) close_toast_notification_if_open();
-    if (settings.show_completion_dialog && !g_hToastWnd && !fs_active &&
-        (micro.phase == MICRO_WAIT_START || micro.phase == MICRO_WAIT_RESUME || is_overtime || completed_pending_mode != TIMER_NONE)) {
-        ShowCompletionNotification(g_main_hwnd, micro.phase != MICRO_NONE ? TIMER_MICRO_BREAK : is_overtime ? overtime_source_mode : completed_pending_mode);
-    }
+    sr_validate();
+    if (g_hToastWnd && settings.reminder_mode != toast_reminder_origin) close_toast_notification_if_open();
+    toast_update_auto_collapse();
     timer_refresh_toast();
     if (fs_active) fs_refresh();
 }
@@ -63,7 +61,8 @@ static void load_settings_preserving_runtime(void) {
 
 static void timer_notify(HWND hwnd, TimerMode mode) {
     if (settings.enable_completion_sound) play_resource_sound("DING_WAV");
-    if (settings.show_completion_dialog)
+    notification_reminder_mode = settings.reminder_mode;
+    if (settings.reminder_mode != 0)
         PostMessageW(hwnd, WM_TOAST_NOTIFY, mode, (LPARAM)timer_stage_generation);
 }
 
@@ -82,41 +81,19 @@ static void timer_refresh_toast(void) {
         if (timer_effective_count()) swprintf(message, 256, L"%ls\n今日累计: %d", status, pomodoro_count);
         else swprintf(message, 256, L"%ls", status);
     }
-    SetWindowTextW(g_hToastButton, L"开始");
+    SetWindowTextW(g_hToastButton, timer_ui_primary_label());
     InvalidateRect(g_hToastWnd, NULL, FALSE);
 }
 
-static int timer_tick_handled(int ordinal) {
-    int i;
-    for (i = 0; i < micro.triggered_count; ++i) if (micro.triggered[i] == ordinal) return 1;
-    return 0;
-}
-
-static int timer_reserve_tick(HWND hwnd) {
-    if (micro.triggered_count < micro.triggered_capacity) return 1;
-    int capacity = micro.triggered_capacity ? micro.triggered_capacity * 2 : 8;
-    int *ticks = (int *)realloc(micro.triggered, (size_t)capacity * sizeof(int));
-    if (!ticks) {
-        stop_timer_clock();
-        is_paused = 1;
-        MessageBoxW(hwnd, L"无法保存微休息刻度，计时已暂停，当前时间已保留。", L"计时暂停", MB_OK | MB_ICONERROR);
-        return 0;
-    }
-    micro.triggered = ticks;
-    micro.triggered_capacity = capacity;
-    return 1;
-}
-
-static void timer_begin_micro_wait(HWND hwnd, int ordinal) {
-    micro.triggered[micro.triggered_count++] = ordinal;
+static void timer_begin_micro_wait(HWND hwnd) {
     micro.phase = MICRO_WAIT_START;
     micro.frozen_seconds = remaining_seconds;
-    ++timer_stage_generation;
+    ++timer_stage_generation; sr_validate();
     close_toast_notification_if_open();
     stop_clock_loop_sound();
     if (timer_effective_overtime()) {
         is_overtime = 1;
-        overtime_seconds = remaining_seconds;
+        overtime_seconds = 0;
         overtime_source_mode = micro.source;
         current_timer_mode = TIMER_NONE;
     } else {
@@ -129,7 +106,7 @@ static void timer_begin_micro_wait(HWND hwnd, int ordinal) {
 static void timer_finish_countdown(HWND hwnd) {
     TimerMode source = current_timer_mode;
     int use_overtime = timer_effective_overtime();
-    ++timer_stage_generation;
+    ++timer_stage_generation; sr_validate();
     close_toast_notification_if_open();
     stop_clock_loop_sound();
     if (source == TIMER_MICRO_BREAK) {
@@ -139,8 +116,9 @@ static void timer_finish_countdown(HWND hwnd) {
             int count = source == TIMER_LONG_POMODORO ? (session_rules.valid ? session_rules.long_count : settings.long_pomodoro_count) : 1;
             if (record_completed_pomodoros(count)) pomodoro_count = get_today_count_from_storage();
             else {
-                pomodoro_count = clamp_int(get_today_count_from_storage() + count, 0, 9999);
-                if (!sync_today_count_to_target(pomodoro_count)) OutputDebugStringA("Failed to persist completion.\n");
+                int target = clamp_int(get_today_count_from_storage() + count, 0, 9999);
+                if (!sync_today_count_to_target(target)) PostMessageW(hwnd, WM_STATS_SAVE_FAILED, 0, 0);
+                pomodoro_count = get_today_count_from_storage();
             }
         }
         set_idle_mode_after_manual_stop();
@@ -175,18 +153,11 @@ static int timer_saturating_add(int value, int delta) {
 static void timer_advance_seconds(HWND hwnd, int elapsed) {
     while (is_running && (elapsed > 0 || (!is_overtime && !is_count_up_timer && remaining_seconds <= 0))) {
         if (is_overtime) {
-            int before = overtime_seconds;
-            overtime_seconds = timer_saturating_add(before, elapsed);
-            if (micro.phase == MICRO_WAIT_START) {
-                micro.extension_seconds = timer_saturating_add(micro.extension_seconds, overtime_seconds - before);
-                remaining_seconds = overtime_seconds;
-                micro.frozen_seconds = overtime_seconds;
-            }
+            overtime_seconds = timer_saturating_add(overtime_seconds, elapsed);
             break;
         }
         if (is_count_up_timer) {
             remaining_seconds = timer_saturating_add(remaining_seconds, elapsed);
-            credit_count_up_thresholds(hwnd);
             break;
         }
         if (remaining_seconds <= 0) {
@@ -196,29 +167,18 @@ static void timer_advance_seconds(HWND hwnd, int elapsed) {
         }
         int ordinal = 0, boundary = 0;
         if (is_pomodoro_mode(current_timer_mode) && micro.source != TIMER_NONE && micro.interval_seconds > 0) {
-            LONGLONG total = (LONGLONG)micro.base_seconds + micro.extension_seconds;
+            LONGLONG total = micro.base_seconds;
             LONGLONG candidate = total >= remaining_seconds ? (total - remaining_seconds) / micro.interval_seconds + 1 : 1;
             LONGLONG tick = total - candidate * micro.interval_seconds;
-            /* Original positive ticks survive a short tail; only extension-created ticks need a full interval. */
-            LONGLONG original_count = (micro.base_seconds - 1LL) / micro.interval_seconds;
-            while (tick > 0 && tick < remaining_seconds &&
-                   (candidate <= original_count || tick >= micro.interval_seconds)) {
-                if (!timer_tick_handled((int)candidate)) {
-                    boundary = (int)tick;
-                    ordinal = (int)candidate;
-                    break;
-                }
-                ++candidate;
-                tick -= micro.interval_seconds;
-            }
+            /* Crossing is strict: resuming or manually setting exactly on a tick does not trigger. */
+            if (tick > 0 && tick < remaining_seconds) { boundary = (int)tick; ordinal = 1; }
         }
         int distance = remaining_seconds - boundary;
-        if (ordinal && elapsed >= distance && !timer_reserve_tick(hwnd)) break;
         int step = elapsed < distance ? elapsed : distance;
         remaining_seconds -= step;
         elapsed -= step;
         if (remaining_seconds == boundary) {
-            if (ordinal) timer_begin_micro_wait(hwnd, ordinal);
+            if (ordinal) timer_begin_micro_wait(hwnd);
             else timer_finish_countdown(hwnd);
         } else if (settings.enable_clock_sound && remaining_seconds <= 10) Beep(440, 100);
     }
@@ -242,11 +202,11 @@ static void timer_start_micro(HWND hwnd) {
     stop_timer_clock();
     clear_overtime_state();
     close_toast_notification_if_open();
-    micro.frozen_seconds = remaining_seconds;
     micro.phase = MICRO_ACTIVE;
-    ++timer_stage_generation;
+    ++timer_stage_generation; sr_validate();
     current_timer_mode = TIMER_MICRO_BREAK;
     remaining_seconds = micro.duration_seconds;
+    timer_remainder_ms=0;
     is_paused = 0;
     is_running = 1;
     launch_timer_clock(hwnd);
@@ -259,8 +219,9 @@ static void timer_restore_focus(HWND hwnd) {
     close_toast_notification_if_open();
     current_timer_mode = micro.source;
     remaining_seconds = micro.frozen_seconds;
+    timer_remainder_ms=0;
     micro.phase = MICRO_NONE;
-    ++timer_stage_generation;
+    ++timer_stage_generation; sr_validate();
     fs_completed_mode = TIMER_NONE;
     is_paused = 0;
     is_running = 1;
@@ -274,18 +235,21 @@ static void timer_select_idle(void) {
     close_toast_notification_if_open();
     current_timer_mode = TIMER_NONE; remaining_seconds = 0; is_paused = 0;
     completed_pending_mode = TIMER_NONE; fs_completed_mode = TIMER_NONE;
-    ++timer_stage_generation;
+    ++timer_stage_generation; sr_validate();
 }
 static void timer_end_overtime(HWND hwnd) {
     TimerMode source = overtime_source_mode;
     stop_timer_clock(); clear_overtime_state(); close_toast_notification_if_open();
-    is_paused = 0; ++timer_stage_generation;
+    is_paused = 0; ++timer_stage_generation; sr_validate();
     if (micro.phase == MICRO_WAIT_START) {
         current_timer_mode = micro.source;
         remaining_seconds = micro.frozen_seconds;
     } else if (micro.phase == MICRO_WAIT_RESUME) {
         current_timer_mode = TIMER_MICRO_BREAK; remaining_seconds = 0;
     } else {
+        /* Source is still available after clear_overtime_state() in this local variable. */
+        current_timer_mode = source;
+        set_idle_mode_after_manual_stop();
         session_rules.valid = 0;
         current_timer_mode = TIMER_NONE; remaining_seconds = 0;
         completed_pending_mode = source;
@@ -299,30 +263,32 @@ static void timer_stop_action(HWND hwnd) {
     if (micro.phase == MICRO_ACTIVE) {
         stop_timer_clock(); close_toast_notification_if_open();
         is_paused = 0; micro.phase = MICRO_WAIT_RESUME; remaining_seconds = 0;
-        ++timer_stage_generation;
+        ++timer_stage_generation; sr_validate();
     } else {
         session_rules.valid = 0;
         stop_timer_clock(); set_idle_mode_after_manual_stop();
         is_paused = 0; current_timer_mode = TIMER_NONE; remaining_seconds = 0;
         clear_count_up_state(); clear_micro_state(); completed_pending_mode = TIMER_NONE;
-        close_toast_notification_if_open(); ++timer_stage_generation;
+        close_toast_notification_if_open(); ++timer_stage_generation; sr_validate();
     }
     save_settings(); refresh_timer_icon_by_state(hwnd);
     if (fs_active) fs_refresh();
 }
 
 static void timer_primary_action(HWND hwnd) {
-    if (is_overtime) timer_end_overtime(hwnd);
+    timer_sync_clock(hwnd);
+    if (is_overtime) {
+        if(micro.phase==MICRO_WAIT_START) timer_start_micro(hwnd);
+        else if(micro.phase==MICRO_WAIT_RESUME) timer_restore_focus(hwnd);
+        else {
+            TimerMode target=timer_next_mode(overtime_source_mode);
+            start_mode_from_menu(hwnd,target);
+        }
+        return;
+    }
+    if (is_running || is_paused) { timer_stop_action(hwnd); return; }
     if (micro.phase == MICRO_WAIT_START) timer_start_micro(hwnd);
     else if (micro.phase == MICRO_WAIT_RESUME) timer_restore_focus(hwnd);
-    else if (is_overtime) start_mode_from_menu(hwnd, timer_next_mode(overtime_source_mode));
-    else if (is_paused) {
-        is_paused = 0;
-        is_running = 1;
-        launch_timer_clock(hwnd);
-        refresh_timer_icon_by_state(hwnd);
-    } else if (is_running) timer_stop_action(hwnd);
-    else if (completed_pending_mode != TIMER_NONE) start_mode_from_menu(hwnd, timer_next_mode(completed_pending_mode));
     else start_current_idle_mode(hwnd);
 }
 

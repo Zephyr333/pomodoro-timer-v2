@@ -24,7 +24,7 @@ static void test_surface_bugs(void) {
     int idle_commands[]={ID_MENU_IDLE_POMODORO,ID_MENU_IDLE_SHORT_POMODORO,ID_MENU_IDLE_SHORT_BREAK,ID_MENU_IDLE_LONG_BREAK,ID_MENU_IDLE_CUSTOM};
     int duration_commands[]={ID_MENU_SET_POMODORO_DURATION,ID_MENU_SET_SHORT_POMODORO_DURATION,ID_MENU_SET_SHORT_BREAK_DURATION,ID_MENU_SET_LONG_BREAK_DURATION,ID_MENU_SET_CUSTOM_DURATION};
     test_silent_sound=1;
-    settings.enable_completion_sound=settings.show_completion_dialog=settings.enable_pomodoro_count=settings.enable_clock_sound=0;
+    settings.enable_completion_sound=settings.reminder_mode=settings.enable_pomodoro_count=settings.enable_clock_sound=0;
     settings.enable_micro_break=1; settings.enable_overtime_count_up=1;
     settings.micro_break_interval_minutes=15;settings.micro_break_duration_minutes=1;
     timer_test_reset();

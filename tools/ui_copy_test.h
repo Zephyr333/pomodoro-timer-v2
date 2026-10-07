@@ -4,7 +4,7 @@ static void test_ui_copy(void) {
     FullscreenView view;
     wchar_t text[96];
     settings.enable_clock_sound = settings.enable_completion_sound = 0;
-    settings.show_completion_dialog = 1;
+    settings.reminder_mode = 1;
     timer_test_reset();
     CHECK(!wcscmp(timer_ui_pause_label(), L"暂停") && !timer_ui_can_pause() && timer_ui_can_start() && !timer_ui_can_end(), "idle labels and availability");
     choose_menu(0);
@@ -15,14 +15,14 @@ static void test_ui_copy(void) {
         fs_read_timer_view(&view);
         swprintf(text, 96, L"%ls", timer_mode_name(modes[i]));
         CHECK(!wcscmp(view.status, text), "running has the shared three-character suffix");
-        CHECK(!wcscmp(timer_ui_primary_label(), L"结束") && !timer_ui_can_start() && timer_ui_can_pause() && timer_ui_can_end(), "running action rules");
+        CHECK(!wcscmp(timer_ui_primary_label(), L"结束") && timer_ui_can_start() && timer_ui_can_pause() && timer_ui_can_end(), "running action rules");
         update_tray_icon(g_main_hwnd, L"2", 0, 123);
         swprintf(text, 96, L"%ls %ls", view.status, view.time);
         CHECK(!wcscmp(nid.szTip, text), "tooltip shares mode time and status");
         is_running = 0; is_paused = 1;
         fs_read_timer_view(&view);
         swprintf(text, 96, L"%ls · 已暂停", timer_mode_name(modes[i]));
-        CHECK(!wcscmp(view.status, text) && !wcscmp(timer_ui_pause_label(), L"继续") && !wcscmp(timer_ui_primary_label(), L"继续"), "paused uses shared status and continue");
+        CHECK(!wcscmp(view.status, text) && !wcscmp(timer_ui_pause_label(), L"继续") && !wcscmp(timer_ui_primary_label(), L"结束"), "paused uses shared status and continue");
         is_paused = 0; is_running = 1; is_overtime = 1; overtime_source_mode = modes[i]; overtime_seconds = 11;
         fs_read_timer_view(&view);
         CHECK(!wcscmp(view.status, L"超时正计时") && !wcscmp(view.time, L"+00:11"), "all overtime sources share one mode name");

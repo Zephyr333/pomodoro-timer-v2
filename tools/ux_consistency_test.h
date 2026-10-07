@@ -21,7 +21,7 @@ static VOID CALLBACK ux_preview_timer(HWND window,UINT message,UINT_PTR id,DWORD
 static void test_ux_consistency(void) {
     TimerSettings saved = settings; DataLocationMode saved_location = g_data_location_mode;
     FullscreenView view; wchar_t expected[96];
-    settings.enable_clock_sound = settings.enable_completion_sound = settings.show_completion_dialog = 0;
+    settings.enable_clock_sound = settings.enable_completion_sound = settings.reminder_mode = 0;
     timer_test_reset();
     micro.source = TIMER_SHORT_POMODORO; micro.phase = MICRO_WAIT_RESUME; micro.frozen_seconds = 1920;
     current_timer_mode = TIMER_MICRO_BREAK; settings.short_pomodoro_duration = 45;

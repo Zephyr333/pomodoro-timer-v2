@@ -8,7 +8,7 @@ static void test_fullscreen_clicks(void) {
     FullscreenMonitors online;
     wchar_t hint[192];
     int i, action, today;
-    settings.enable_clock_sound=settings.enable_completion_sound=settings.show_completion_dialog=settings.enable_pomodoro_count=0;
+    settings.enable_clock_sound=settings.enable_completion_sound=settings.reminder_mode=settings.enable_pomodoro_count=0;
     timer_test_reset();start_timer(g_main_hwnd,40,TIMER_SHORT_POMODORO);choose_menu(ID_MENU_PAUSE_RESUME);
     int seconds=remaining_seconds;unsigned generation=timer_stage_generation;today=get_today_count_from_storage();
     CHECK(fs_get_monitors(&online) && online.count>0,"native display inventory exists");

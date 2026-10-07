@@ -2,7 +2,7 @@
 static void test_ready_states(void) {
     TimerSettings saved = settings;
     FullscreenView view;
-    settings.enable_clock_sound = settings.enable_completion_sound = settings.show_completion_dialog = 0;
+    settings.enable_clock_sound = settings.enable_completion_sound = settings.reminder_mode = 0;
     settings.enable_pomodoro_count = 0;
     settings.enable_micro_break = 1; settings.micro_break_interval_minutes = 15; settings.micro_break_duration_minutes = 1;
     settings.enable_overtime_count_up = 0;
@@ -34,12 +34,12 @@ static void test_ready_states(void) {
     settings.enable_overtime_count_up = 1;
     start_timer(g_main_hwnd, 45, TIMER_SHORT_POMODORO); timer_advance_seconds(g_main_hwnd, 902);
     timer_stop_action(g_main_hwnd);
-    CHECK(!is_overtime && !is_running && micro.phase == MICRO_WAIT_START && remaining_seconds == 1802 && micro.extension_seconds == 2, "ending due overtime preserves passive extension and main time");
+    CHECK(!is_overtime && !is_running && micro.phase == MICRO_WAIT_START && remaining_seconds == 1800 && micro.frozen_seconds == 1800, "ending due overtime preserves the original frozen main time");
     timer_primary_action(g_main_hwnd); timer_advance_seconds(g_main_hwnd, 63);
     CHECK(is_overtime && timer_ui_can_end(), "expired micro overtime has an end operation");
     choose_menu(ID_MENU_PAUSE_RESUME); choose_menu(ID_MENU_STOP);
     ready = timer_ui_resolve();
-    CHECK(ready.mode == TIMER_SHORT_POMODORO && ready.seconds == 1802 && ready.state == TIMER_UI_READY && !is_overtime && !is_running, "paused micro overtime ends to frozen focus ready");
+    CHECK(ready.mode == TIMER_SHORT_POMODORO && ready.seconds == 1800 && ready.state == TIMER_UI_READY && !is_overtime && !is_running, "paused micro overtime ends to frozen focus ready");
     choose_menu(ID_MENU_IDLE_CUSTOM);
     CHECK(micro.source == TIMER_NONE && timer_ui_resolve().mode == TIMER_CUSTOM && !is_running, "explicit ready mode choice abandons old context without starting");
     timer_test_reset();
