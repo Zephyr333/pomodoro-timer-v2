@@ -7,13 +7,13 @@ static struct {
     ULONGLONG started;
     HWND foreground, focus;
     FullscreenView last_view;
-    int last_white;
-    struct { HWND window; FullscreenMonitor monitor; } items[FS_MAX_MONITORS];
+    int last_white,focus_reconciling;
+    struct { HWND window; FullscreenMonitor monitor; HDC dc; HBITMAP bitmap,previous; int width,height; } items[FS_MAX_MONITORS];
     size_t count;
 } sr;
 static int sr_active(void) { return sr.active; }
 static void sr_track_focus(HWND candidate) {
-    if(!sr.active)return;
+    if(!sr.active||sr.focus_reconciling)return;
     UiFocusReturn context={sr.foreground,sr.focus};ui_focus_remember(&context,candidate,NULL);
     sr.foreground=context.foreground;sr.focus=context.focus;
 }
@@ -27,28 +27,47 @@ static HWND sr_bottom_window(void) {
         for(i=0;i<sr.count;++i)if(w==sr.items[i].window){bottom=w;break;}
     return bottom;
 }
+static int sr_monitor_covered(HMONITOR monitor) {
+    if(!sr.active||!monitor)return 0;
+    for(size_t i=0;i<sr.count;++i)if(sr.items[i].monitor.handle==monitor)return 1;
+    return 0;
+}
+static int sr_owns_foreground(HWND window) {
+    for(size_t i=0;i<sr.count;++i)if(window==sr.items[i].window)return 1;
+    return 0;
+}
+static void sr_release_buffer(size_t i) {
+    if(sr.items[i].dc&&sr.items[i].previous)SelectObject(sr.items[i].dc,sr.items[i].previous);
+    if(sr.items[i].bitmap)DeleteObject(sr.items[i].bitmap);if(sr.items[i].dc)DeleteDC(sr.items[i].dc);
+    sr.items[i].dc=NULL;sr.items[i].bitmap=sr.items[i].previous=NULL;sr.items[i].width=sr.items[i].height=0;
+}
 static void sr_maintain_layer(void) {
-    size_t i;
-    if (!sr.active) return;
-    for(i=0;i<sr.count;++i) SetWindowPos(sr.items[i].window,HWND_TOPMOST,0,0,0,0,
-        SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOOWNERZORDER);
+    if(!sr.active)return;
+    for(size_t i=0;i<sr.count;++i){HWND window=sr.items[i].window;int wrong=!(GetWindowLongW(window,GWL_EXSTYLE)&WS_EX_TOPMOST)||fs_taskbar_above(window);
+        if(fs_active)for(size_t j=0;j<fs_count&&!wrong;++j){RECT a,b,overlap;GetWindowRect(window,&a);GetWindowRect(fs_windows[j],&b);
+            if(fs_taskbar_above(fs_windows[j])||(IntersectRect(&overlap,&a,&b)&&fs_window_above(fs_windows[j],window)))wrong=1;}
+        if(wrong)SetWindowPos(window,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOOWNERZORDER);
+    }
 }
 static void sr_dismiss(int restore) {
+#ifdef POMODORO_TEST_IO
+    if(sr.active)printf("SR dismiss restore=%d generation=%u current=%u mode=%d\n",restore,sr.generation,timer_stage_generation,settings.reminder_mode);
+#endif
     size_t i;
     HWND foreground=sr.foreground, focus=sr.focus;
     HWND current=GetForegroundWindow();
-    if(!IsWindow(current)) current=GetActiveWindow();
     int owned=0;
     for(i=0;i<sr.count;++i) if(current==sr.items[i].window) owned=1;
     if (!sr.active && !sr.count) return;
     sr.active=0;
     KillTimer(g_main_hwnd,ID_STRONG_REMINDER_TIMER);
-    for(i=0;i<sr.count;++i) DestroyWindow(sr.items[i].window);
-    sr.count=0;
+    for(i=0;i<sr.count;++i){sr_release_buffer(i);DestroyWindow(sr.items[i].window);}
+    sr.count=0;memset(sr.items,0,sizeof(sr.items));
+    fs_maintain_layer(1);
     sr.foreground=NULL;sr.focus=NULL;
     SetCursor(LoadCursor(NULL,IDC_ARROW));
     if(restore && (owned || current==g_main_hwnd || !IsWindow(current))) {
-        UiFocusReturn context={foreground,focus};ui_focus_apply(context);
+        UiFocusReturn context={foreground,focus};ui_focus_restore(context,NULL);
     }
 }
 static void sr_validate(void) {
@@ -56,18 +75,19 @@ static void sr_validate(void) {
 }
 static int sr_white(void) { return ((GetTickCount64()-sr.started)/1000)%2==0; }
 static void sr_paint(HWND window) {
-    PAINTSTRUCT paint;RECT bounds;FullscreenView view;
-    HDC target=BeginPaint(window,&paint), dc=CreateCompatibleDC(target);
-    GetClientRect(window,&bounds);
-    HBITMAP bitmap=CreateCompatibleBitmap(target,max(1,bounds.right),max(1,bounds.bottom));
-    if(dc && bitmap) {
-        HGDIOBJ previous=SelectObject(dc,bitmap);
-        fs_read_timer_view(&view);
-        fs_draw_view_ex(dc,bounds,&view,1,1,sr.last_white);
-        BitBlt(target,0,0,bounds.right,bounds.bottom,dc,0,0,SRCCOPY);
-        SelectObject(dc,previous);
-    } else FillRect(target,&bounds,(HBRUSH)GetStockObject(sr.last_white?WHITE_BRUSH:BLACK_BRUSH));
-    if(bitmap) DeleteObject(bitmap);if(dc) DeleteDC(dc);
+    PAINTSTRUCT paint;RECT bounds;FullscreenView view;size_t i;
+    HDC target=BeginPaint(window,&paint);GetClientRect(window,&bounds);
+    for(i=0;i<sr.count;++i)if(sr.items[i].window==window)break;
+    if(i<sr.count){
+        if(!sr.items[i].dc||sr.items[i].width!=bounds.right||sr.items[i].height!=bounds.bottom){
+            sr_release_buffer(i);sr.items[i].dc=CreateCompatibleDC(target);sr.items[i].bitmap=CreateCompatibleBitmap(target,max(1,bounds.right),max(1,bounds.bottom));
+            if(sr.items[i].dc&&sr.items[i].bitmap){sr.items[i].previous=(HBITMAP)SelectObject(sr.items[i].dc,sr.items[i].bitmap);sr.items[i].width=bounds.right;sr.items[i].height=bounds.bottom;}
+            else sr_release_buffer(i);
+        }
+        if(sr.items[i].dc){fs_read_timer_view(&view);fs_draw_view_ex(sr.items[i].dc,bounds,&view,1,1,sr.last_white);
+            BitBlt(target,0,0,bounds.right,bounds.bottom,sr.items[i].dc,0,0,SRCCOPY);}
+        else FillRect(target,&bounds,(HBRUSH)GetStockObject(sr.last_white?WHITE_BRUSH:BLACK_BRUSH));
+    }
     EndPaint(window,&paint);
 }
 static LRESULT CALLBACK StrongReminderWndProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
@@ -81,7 +101,11 @@ static LRESULT CALLBACK StrongReminderWndProc(HWND window,UINT message,WPARAM wP
         case WM_SETCURSOR:SetCursor(LoadCursor(NULL,IDC_ARROW));return TRUE;
         case WM_LBUTTONDOWN:case WM_MBUTTONDOWN:case WM_RBUTTONDOWN:case WM_XBUTTONDOWN:
         case WM_LBUTTONDBLCLK:case WM_MBUTTONDBLCLK:case WM_RBUTTONDBLCLK:return 0;
-        case WM_LBUTTONUP:case WM_MBUTTONUP:case WM_XBUTTONUP:case WM_CLOSE:sr_dismiss(1);return 0;
+        case WM_LBUTTONUP:case WM_MBUTTONUP:case WM_XBUTTONUP:case WM_CLOSE:
+#ifdef POMODORO_TEST_IO
+            printf("SR close input message=%x\n",message);
+#endif
+            sr_dismiss(1);return 0;
         case WM_RBUTTONUP: {
             unsigned generation=sr.generation;
             timer_sync_clock(g_main_hwnd);
@@ -123,34 +147,39 @@ static int sr_start(void) {
             r.left,r.top,r.right-r.left,r.bottom-r.top,NULL,NULL,wc.hInstance,NULL);
         if(!window) { failed=1;break; }
         sr.items[sr.count].window=window;sr.items[sr.count].monitor=*monitor;++sr.count;
+        fs_maintain_layer(1);
         ShowWindow(window,SW_SHOWNOACTIVATE);UpdateWindow(window);
     }
     fs_leave_dpi(dpi);
-    if(failed || !sr.count || !SetTimer(g_main_hwnd,ID_STRONG_REMINDER_TIMER,100,NULL)) { sr_dismiss(1);return 0; }
-    sr_maintain_layer();SetForegroundWindow(sr.items[0].window);SetFocus(sr.items[0].window);
+    if(failed || !sr.count || !fs_guard_timer_active || !fs_taskbar_available || fs_taskbar_stopping || !fs_foreground_hook || !fs_show_hook || !fs_reorder_hook || !SetTimer(g_main_hwnd,ID_STRONG_REMINDER_TIMER,100,NULL)) { sr_dismiss(1);return 0; }
+    fs_maintain_layer(1);SetForegroundWindow(sr.items[0].window);SetFocus(sr.items[0].window);
     return 1;
 }
 static void sr_reconcile_monitors(const FullscreenMonitors *list) {
     FullscreenMonitors online=*list;size_t i=0,j;HANDLE dpi;int lost_focus=0;
     if(!sr.active) return;
+    HWND before=GetForegroundWindow();sr.focus_reconciling=1;
     dpi=fs_enter_dpi();
     while(i<sr.count) {
         for(j=0;j<online.count;++j) if(!wcscmp(sr.items[i].monitor.identity,online.items[j].identity)) break;
         if(j==online.count) {
-            if(GetFocus()==sr.items[i].window || GetForegroundWindow()==sr.items[i].window) lost_focus=1;
-            DestroyWindow(sr.items[i].window);
+            if(before==sr.items[i].window) lost_focus=1;
+            sr_release_buffer(i);DestroyWindow(sr.items[i].window);
             memmove(sr.items+i,sr.items+i+1,(sr.count-i-1)*sizeof(sr.items[0]));--sr.count;continue;
         }
         RECT r=online.items[j].info.rcMonitor;
         sr.items[i].monitor=online.items[j];
-        SetWindowPos(sr.items[i].window,NULL,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOACTIVATE|SWP_NOZORDER);
+        RECT actual;GetWindowRect(sr.items[i].window,&actual);
+        if(!EqualRect(&r,&actual))SetWindowPos(sr.items[i].window,NULL,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOACTIVATE|SWP_NOZORDER);
         ++i;
     }
-    fs_leave_dpi(dpi);
+    fs_leave_dpi(dpi);sr.focus_reconciling=0;
+    fs_maintain_layer(1);
     if(!sr.count) sr_dismiss(1);
     else {
         sr_maintain_layer();
-        if(lost_focus){SetForegroundWindow(sr.items[0].window);SetFocus(sr.items[0].window);}
+        HWND current=GetForegroundWindow();
+        if(lost_focus && (!IsWindow(current)||current==g_main_hwnd||sr_owns_foreground(current))){SetForegroundWindow(sr.items[0].window);SetFocus(sr.items[0].window);}
     }
 }
 static void sr_reconcile(void) {
@@ -158,7 +187,7 @@ static void sr_reconcile(void) {
 }
 static void sr_tick(void) {
     size_t i;FullscreenView view;sr_validate();if(!sr.active)return;
-    sr_track_focus(ui_foreground());sr_maintain_layer();fs_read_timer_view(&view);
+    sr_track_focus(GetForegroundWindow());fs_read_timer_view(&view);
     int white=sr_white();
     if(white==sr.last_white && !memcmp(&view,&sr.last_view,sizeof(view))) return;
     sr.last_view=view;sr.last_white=white;

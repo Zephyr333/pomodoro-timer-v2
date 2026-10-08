@@ -4,6 +4,7 @@
 #define _UNICODE
 #include <windows.h>
 #include <string.h>
+#include <stdio.h>
 #include <mmsystem.h>
 #include <shellapi.h>
 static int test_silent_sound, test_one_shot_sound_count;
@@ -84,16 +85,18 @@ static HWND WINAPI test_create_window_ex(DWORD ex, LPCWSTR cls, LPCWSTR title, D
 }
 #define CreateWindowExW test_create_window_ex
 static int test_visual_z_tracking, test_visual_z_violations,test_repair_z_tracking;
+static int test_position_calls;
 static void test_repair_z_observe(void);
 static void test_visual_z_observe(void);
 static BOOL WINAPI test_visual_window_pos(HWND w,HWND after,int x,int y,int cx,int cy,UINT flags) {
-    BOOL result=SetWindowPos(w,after,x,y,cx,cy,flags);
+    ++test_position_calls;BOOL result=SetWindowPos(w,after,x,y,cx,cy,flags);
     if(result && (test_visual_z_tracking||test_repair_z_tracking))test_visual_z_observe();
     return result;
 }
 #define SetWindowPos test_visual_window_pos
 static BOOL WINAPI test_visual_show_window(HWND w,int cmd) {
-    BOOL result=ShowWindow(w,cmd);if(test_visual_z_tracking||test_repair_z_tracking)test_visual_z_observe();return result;
+    BOOL result=ShowWindow(w,cmd);
+    if(test_visual_z_tracking||test_repair_z_tracking)test_visual_z_observe();return result;
 }
 static BOOL WINAPI test_visual_foreground(HWND w) {
     BOOL result=SetForegroundWindow(w);if(test_visual_z_tracking||test_repair_z_tracking)test_visual_z_observe();return result;
@@ -102,9 +105,10 @@ static BOOL WINAPI test_visual_foreground(HWND w) {
 #define SetForegroundWindow test_visual_foreground
 #define POMODORO_TEST_IO 1
 static int test_io_active, test_fail_stats_commit;
+static wchar_t test_last_message[512];
 static wchar_t test_io_root[MAX_PATH], test_io_folder[MAX_PATH];
 static int WINAPI test_io_message(HWND owner, LPCWSTR text, LPCWSTR title, UINT flags) {
-    if (test_io_active) return (flags & MB_TYPEMASK) == MB_YESNO ? IDYES : IDOK;
+    if (test_io_active) { wcsncpy(test_last_message,text,511);test_last_message[511]=0;return (flags & MB_TYPEMASK) == MB_YESNO ? IDYES : IDOK; }
     return MessageBoxW(owner,text,title,flags);
 }
 #define MessageBoxW test_io_message
@@ -735,6 +739,7 @@ static void test_signature(void) {
 #include "reliability_test.h"
 #include "visual_stability_test.h"
 #include "gui_repair_test.h"
+#include "seal_fix_test.h"
 
 static void test_reminder_menu(void) {
     TimerSettings saved=settings;
@@ -750,6 +755,8 @@ static void test_reminder_menu(void) {
     printf("REMINDER_MENU_TEST: %s (%d failures)\n",failures ? "FAIL" : "PASS",failures);
 }
 
+#include "harden_test.h"
+
 int wmain(int argc, wchar_t **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     WNDCLASSW wc = {0};
@@ -761,7 +768,7 @@ int wmain(int argc, wchar_t **argv) {
     HANDLE old_dpi;
     HHOOK trace_hook;
     HDESK test_desktop = NULL;
-    int interactive = 0, stress = 0, ui_copy_only = 0, ready_only = 0, ux_only = 0, flexible_only = 0, micro_preview_only = 0, surface_only = 0, click_only = 0, wait_overtime_only = 0, strong_only = 0, reminder_menu_only = 0, consistency_only = 0, reliability_only = 0, tray_layout_only = 0, visual_only = 0, repair_only = 0;
+    int interactive = 0, stress = 0, ui_copy_only = 0, ready_only = 0, ux_only = 0, flexible_only = 0, micro_preview_only = 0, surface_only = 0, click_only = 0, wait_overtime_only = 0, strong_only = 0, reminder_menu_only = 0, consistency_only = 0, reliability_only = 0, tray_layout_only = 0, visual_only = 0, repair_only = 0, harden_only=0, seal_only=0, guard_live=-1, focus_live=0;
     if (argc < 2 || wcsncmp(argv[1], L"tools\\.fullscreen-test\\", 23) != 0 || wcsstr(argv[1], L"..")) {
         /* Require the script's relative output path, not a personal data path. */
         fprintf(stderr, "Usage: fullscreen_test.exe tools\\.fullscreen-test\\run-id\n"); return 2;
@@ -784,6 +791,10 @@ int wmain(int argc, wchar_t **argv) {
         if (!wcscmp(argv[i], L"--tray-layout-only")) tray_layout_only = 1;
         if (!wcscmp(argv[i], L"--visual-only")) visual_only = 1;
         if (!wcscmp(argv[i], L"--repair-only")) repair_only = 1;
+        if(!wcscmp(argv[i],L"--seal-only"))seal_only=1;
+        if(!wcscmp(argv[i],L"--harden-only"))harden_only=1;
+        if(!wcscmp(argv[i],L"--guard-live")&&i+1<argc)guard_live=_wtoi(argv[++i]);
+        if(!wcscmp(argv[i],L"--focus-live"))focus_live=1;
     }
     if (!interactive) {
         wchar_t desktop_name[80];
@@ -796,6 +807,17 @@ int wmain(int argc, wchar_t **argv) {
             return 2;
         }
         puts("Using an isolated desktop; the visible desktop is never switched.");
+    } else {
+        HWINSTA winsta = OpenWindowStationW(L"WinSta0", FALSE, MAXIMUM_ALLOWED);
+        if (winsta) {
+            SetProcessWindowStation(winsta);
+            HDESK default_desktop = OpenDesktopW(L"Default", 0, FALSE, MAXIMUM_ALLOWED);
+            if (default_desktop) {
+                SetThreadDesktop(default_desktop);
+                CloseDesktop(default_desktop);
+            }
+            CloseWindowStation(winsta);
+        }
     }
     {
         HMENU probe = CreatePopupMenu();
@@ -815,8 +837,8 @@ int wmain(int argc, wchar_t **argv) {
     trace_hook = SetWindowsHookExW(WH_CALLWNDPROC, trace_window_messages, NULL, GetCurrentThreadId());
     CHECK(trace_hook != NULL, "window lifecycle observer installed");
 
-    if (ui_copy_only || ready_only || ux_only || flexible_only || micro_preview_only || surface_only || click_only || wait_overtime_only || strong_only || reminder_menu_only || consistency_only || reliability_only || tray_layout_only || visual_only || repair_only) {
-        if(repair_only)test_gui_repairs(); else if(visual_only){visual_live_desktop=interactive;test_visual_stability();} else if(tray_layout_only){TimerSettings saved=settings;consistency_reset();reliability_icon_sheet();settings=saved;printf("TRAY_LAYOUT_TEST: %s (%d failures)\n",failures ? "FAIL" : "PASS",failures);} else if (reliability_only) test_reliability(); else if (consistency_only) test_session_consistency(); else if (reminder_menu_only) test_reminder_menu(); else if (strong_only) test_strong_reminder(); else if (wait_overtime_only) test_micro_wait_overtime(); else if (click_only) test_fullscreen_clicks(); else if (surface_only) test_surface_bugs(); else if (micro_preview_only) test_micro_preview(); else if (flexible_only) test_flexible_controls(); else if (ux_only) test_ux_consistency(); else if (ready_only) test_ready_states(); else test_ui_copy();
+    if (ui_copy_only || ready_only || ux_only || flexible_only || micro_preview_only || surface_only || click_only || wait_overtime_only || strong_only || reminder_menu_only || consistency_only || reliability_only || tray_layout_only || visual_only || repair_only || harden_only || seal_only || guard_live>=0 || focus_live) {
+        if(harden_only)test_harden();else if(guard_live>=0)test_guard_live(guard_live); else if(focus_live)test_focus_live(); else if(seal_only)test_seal_fixes(); else if(repair_only)test_gui_repairs(); else if(visual_only){visual_live_desktop=interactive;test_visual_stability();} else if(tray_layout_only){TimerSettings saved=settings;consistency_reset();reliability_icon_sheet();settings=saved;printf("TRAY_LAYOUT_TEST: %s (%d failures)\n",failures ? "FAIL" : "PASS",failures);} else if (reliability_only) test_reliability(); else if (consistency_only) test_session_consistency(); else if (reminder_menu_only) test_reminder_menu(); else if (strong_only) test_strong_reminder(); else if (wait_overtime_only) test_micro_wait_overtime(); else if (click_only) test_fullscreen_clicks(); else if (surface_only) test_surface_bugs(); else if (micro_preview_only) test_micro_preview(); else if (flexible_only) test_flexible_controls(); else if (ux_only) test_ux_consistency(); else if (ready_only) test_ready_states(); else test_ui_copy();
         if (trace_hook) UnhookWindowsHookEx(trace_hook);
         DestroyWindow(g_main_hwnd);
         if (test_desktop) CloseDesktop(test_desktop);

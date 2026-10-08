@@ -37,9 +37,10 @@ static int timer_correct_today_count(HWND hwnd, int count) {
     timer_sync_clock(hwnd);
     refresh_today_count_if_day_changed(hwnd, 0);
     if (!sync_today_count_to_target(count)) {
-        MessageBoxW(hwnd,L"今日统计同步失败。",L"错误",MB_OK|MB_ICONERROR); return 0;
+        if(stats_has_read_error()){stats_suppress_read_warning();MessageBoxW(hwnd,L"统计无法完整读取，本次数量修改未应用，原统计数据未改动。",L"统计读取失败",MB_OK|MB_ICONERROR);}
+        else MessageBoxW(hwnd,L"今日统计同步失败，数量修改未应用。",L"错误",MB_OK|MB_ICONERROR); return 0;
     }
-    pomodoro_count = count; save_settings();
+    pomodoro_count = count; stats_needs_refresh=0; save_settings();
     if (g_hHeatmapWnd) InvalidateRect(g_hHeatmapWnd,NULL,TRUE);
     refresh_timer_icon_by_state(hwnd); return 1;
 }
@@ -114,12 +115,11 @@ static void timer_finish_countdown(HWND hwnd) {
     } else {
         if (is_pomodoro_mode(source) && timer_effective_count()) {
             int count = source == TIMER_LONG_POMODORO ? (session_rules.valid ? session_rules.long_count : settings.long_pomodoro_count) : 1;
-            if (record_completed_pomodoros(count)) pomodoro_count = get_today_count_from_storage();
-            else {
-                int target = clamp_int(get_today_count_from_storage() + count, 0, 9999);
-                if (!sync_today_count_to_target(target)) PostMessageW(hwnd, WM_STATS_SAVE_FAILED, 0, 0);
-                pomodoro_count = get_today_count_from_storage();
-            }
+            int committed=record_completed_pomodoros(count);
+            if(!committed)committed=stats_fallback_credit(count);
+            if(!committed){stats_suppress_read_warning();PostMessageW(hwnd,WM_STATS_SAVE_FAILED,0,0);}
+            int value;if(stats_try_today(&value)){pomodoro_count=value;stats_needs_refresh=0;}
+
         }
         set_idle_mode_after_manual_stop();
         clear_micro_state();

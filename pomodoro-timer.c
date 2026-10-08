@@ -86,6 +86,8 @@
 #define WM_TOAST_NOTIFY (WM_APP + 100)
 #define WM_SETTINGS_SAVE_FAILED (WM_APP + 101)
 #define WM_STATS_SAVE_FAILED (WM_APP + 112)
+#define WM_STATS_READ_FAILED (WM_APP + 113)
+#define WM_SETTINGS_RECOVERY_FAILED (WM_APP + 114)
 #define ID_TOAST_ACTION 2001
 #define ID_TOAST_CLOSE 2002
 #define ID_TOAST_COLLAPSE 2003
@@ -94,6 +96,7 @@
 #define ID_HEATMAP_TODAY 3003
 #define ID_MAIN_DAY_SYNC_TIMER 4001
 #define ID_TRAY_RETRY_TIMER 4007
+#define ID_LAYER_GUARD_TIMER 4008
 
 // Structure for localized strings
 typedef struct {
@@ -503,7 +506,7 @@ void ShowHeatmapWindow(HWND hwnd);
 LRESULT CALLBACK HeatmapWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 BOOL PromptForInteger(HWND hwndParent, const wchar_t* title, const wchar_t* label, int currentValue, int minValue, int maxValue, int* outValue);
 INT_PTR CALLBACK InputDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
-static void load_heatmap_data(void);
+static int load_heatmap_data(void);
 static int get_day_count_value(int year, int month, int day);
 static int sync_today_count_to_target(int targetCount);
 static void build_data_file_paths(void);
@@ -516,8 +519,11 @@ static int import_data_from_folder(HWND hwnd);
 static void repair_settings_recovery_chain(void);
 static void reset_defaults_keep_data(void);
 static void refresh_timer_icon_by_state(HWND hwnd);
-static void maybe_archive_log_monthly(void);
-static void load_archive_logs(void);
+static int stats_try_today(int *value);
+static int stats_fallback_credit(int count);
+static int stats_has_read_error(void);
+static void stats_suppress_read_warning(void);
+static int stats_needs_refresh;
 static int get_today_count_from_storage(void);
 static void refresh_today_count_if_day_changed(HWND hwnd, int forceRefresh);
 static void add_day_count(DayCount* days, int* dayCount, const char* date, int delta);
@@ -542,6 +548,7 @@ static void timer_refresh_toast(void);
 static int sr_active(void);
 static void sr_maintain_layer(void);
 static HWND sr_bottom_window(void);
+static int sr_monitor_covered(HMONITOR monitor);
 static void sr_mouse_hint(wchar_t *out, size_t capacity);
 static void sr_validate(void);
 static void sr_dismiss(int restore);
@@ -774,33 +781,12 @@ static int copy_if_exists(const wchar_t* src, const wchar_t* dst) {
     return CopyFileW(src, dst, FALSE) ? 1 : 0;
 }
 
+#include "settings_json.h"
+#include "config_recovery.h"
 static void repair_settings_recovery_chain(void) {
-    DWORD mainAttr;
-    DWORD tmpAttr;
-    DWORD bakAttr;
-
-    if (g_settings_lock_ready) EnterCriticalSection(&g_settings_file_lock);
-
-    mainAttr = GetFileAttributesW(g_settings_path);
-    tmpAttr = GetFileAttributesW(g_settings_tmp_path);
-    bakAttr = GetFileAttributesW(g_settings_bak_path);
-
-    if (mainAttr == INVALID_FILE_ATTRIBUTES || (mainAttr & FILE_ATTRIBUTE_DIRECTORY)) {
-        if (tmpAttr != INVALID_FILE_ATTRIBUTES && !(tmpAttr & FILE_ATTRIBUTE_DIRECTORY)) {
-            CopyFileW(g_settings_tmp_path, g_settings_path, FALSE);
-        } else if (bakAttr != INVALID_FILE_ATTRIBUTES && !(bakAttr & FILE_ATTRIBUTE_DIRECTORY)) {
-            CopyFileW(g_settings_bak_path, g_settings_path, FALSE);
-        }
-    }
-
-    mainAttr = GetFileAttributesW(g_settings_path);
-    bakAttr = GetFileAttributesW(g_settings_bak_path);
-    if (mainAttr != INVALID_FILE_ATTRIBUTES && !(mainAttr & FILE_ATTRIBUTE_DIRECTORY) &&
-        (bakAttr == INVALID_FILE_ATTRIBUTES || (bakAttr & FILE_ATTRIBUTE_DIRECTORY))) {
-        CopyFileW(g_settings_path, g_settings_bak_path, TRUE);
-    }
-
-    if (g_settings_lock_ready) LeaveCriticalSection(&g_settings_file_lock);
+    char bytes[8192];if(g_settings_lock_ready)EnterCriticalSection(&g_settings_file_lock);
+    config_recover_read(bytes,sizeof(bytes));
+    if(g_settings_lock_ready)LeaveCriticalSection(&g_settings_file_lock);
 }
 
 static int migrate_data_files(const wchar_t* oldDir, const wchar_t* newDir, int* migratedCount, int* failedCount, int* expectedCount) {
@@ -943,7 +929,7 @@ static int choose_folder_dialog(HWND owner, const wchar_t* title, wchar_t* outPa
     return ok;
 }
 
-static int switch_data_location(HWND hwnd, DataLocationMode mode, const wchar_t* customPath) {
+static int switch_data_location_impl(HWND hwnd, DataLocationMode mode, const wchar_t* customPath) {
     wchar_t targetDir[MAX_PATH];
     wchar_t prevDir[MAX_PATH];
     wchar_t prevCustomDir[MAX_PATH];
@@ -1047,7 +1033,7 @@ static int switch_data_location(HWND hwnd, DataLocationMode mode, const wchar_t*
     return 1;
 }
 
-static int export_data_to_folder(HWND hwnd) {
+static int export_data_to_folder_impl(HWND hwnd) {
     wchar_t outDir[MAX_PATH];
     wchar_t dst[MAX_PATH];
     wchar_t msg[384];
@@ -1148,187 +1134,20 @@ static int export_data_to_folder(HWND hwnd) {
     return 1;
 }
 
+#include "import_transaction.h"
+static int data_operation_busy;
+static int data_operation_begin(HWND hwnd) {
+    if(data_operation_busy){MessageBoxW(hwnd,L"当前数据操作尚未结束，请完成后再进行其他数据操作。",L"提示",MB_OK|MB_ICONINFORMATION);return 0;}
+    data_operation_busy=1;return 1;
+}
 static int import_data_from_folder(HWND hwnd) {
-    wchar_t inDir[MAX_PATH];
-    wchar_t backupDir[MAX_PATH];
-    wchar_t msg[384];
-    time_t now;
-    struct tm* tmNow;
-    int expected = 0;
-    int copied = 0;
-    int failed = 0;
-    int backupExpected = 0;
-    int backupCopied = 0;
-    int backupFailed = 0;
-    int restoreExpected = 0;
-    int restoreCopied = 0;
-    int restoreFailed = 0;
-    int okMain;
-    int okArchive;
-
-    if (is_running) {
-        MessageBoxW(hwnd, L"请暂停计时后导入数据。", L"提示", MB_OK | MB_ICONINFORMATION);
-        return 0;
-    }
-
-    if (!choose_folder_dialog(hwnd, L"选择导入目录", inDir, MAX_PATH)) return 0;
-    if (is_running) { MessageBoxW(hwnd, L"计时已继续，请暂停后再导入。", L"提示", MB_OK | MB_ICONINFORMATION); return 0; }
-    if (_wcsicmp(inDir, g_data_dir) == 0) {
-        MessageBoxW(hwnd, L"不能从当前正在使用的数据目录导入。", L"提示", MB_OK | MB_ICONINFORMATION);
-        return 0;
-    }
-    if (!directory_has_data_files(inDir)) {
-        MessageBoxW(hwnd, L"所选目录中没有可导入的番茄钟数据。", L"提示", MB_OK | MB_ICONINFORMATION);
-        return 0;
-    }
-    if (MessageBoxW(hwnd,
-        L"导入会用所选备份替换当前数据。程序会先在当前数据目录创建完整备份；是否继续？",
-        L"确认导入", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
-        return 0;
-    }
-
-    ensure_directory_exists(g_data_dir);
-    if (is_running) { MessageBoxW(hwnd,L"计时已继续，请暂停后再导入。",L"提示",MB_OK|MB_ICONINFORMATION); return 0; }
-    now = time(NULL);
-    tmNow = localtime(&now);
-    if (tmNow) {
-        swprintf(backupDir, MAX_PATH, L"%ls\\import_backup_%04d%02d%02d_%02d%02d%02d_%lu",
-            g_data_dir, tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday,
-            tmNow->tm_hour, tmNow->tm_min, tmNow->tm_sec, GetCurrentProcessId());
-    } else {
-        swprintf(backupDir, MAX_PATH, L"%ls\\import_backup_%lu", g_data_dir, GetCurrentProcessId());
-    }
-    ensure_directory_exists(backupDir);
-    if (GetFileAttributesW(backupDir) == INVALID_FILE_ATTRIBUTES) {
-        MessageBoxW(hwnd, L"无法创建导入前备份目录，导入已取消。", L"导入失败", MB_OK | MB_ICONERROR);
-        return 0;
-    }
-
-    okMain = migrate_data_files(g_data_dir, backupDir, &backupCopied, &backupFailed, &backupExpected);
-    okArchive = migrate_archive_logs(g_data_dir, backupDir, &backupCopied, &backupFailed, &backupExpected);
-    if (!(okMain && okArchive)) {
-        delete_data_files_in_directory(backupDir);
-        RemoveDirectoryW(backupDir);
-        MessageBoxW(hwnd, L"无法完整备份当前数据，导入已取消；当前数据未改动。", L"导入失败", MB_OK | MB_ICONERROR);
-        return 0;
-    }
-
-    if (!delete_data_files_in_directory(g_data_dir)) {
-        delete_data_files_in_directory(g_data_dir);
-        migrate_data_files(backupDir, g_data_dir, &restoreCopied, &restoreFailed, &restoreExpected);
-        migrate_archive_logs(backupDir, g_data_dir, &restoreCopied, &restoreFailed, &restoreExpected);
-        MessageBoxW(hwnd, L"无法清理当前数据，已尝试恢复导入前状态；导入已取消。", L"导入失败", MB_OK | MB_ICONERROR);
-        return 0;
-    }
-
-    okMain = migrate_data_files(inDir, g_data_dir, &copied, &failed, &expected);
-    okArchive = migrate_archive_logs(inDir, g_data_dir, &copied, &failed, &expected);
-    if (!(okMain && okArchive)) {
-        delete_data_files_in_directory(g_data_dir);
-        restoreCopied = restoreFailed = restoreExpected = 0;
-        okMain = migrate_data_files(backupDir, g_data_dir, &restoreCopied, &restoreFailed, &restoreExpected);
-        okArchive = migrate_archive_logs(backupDir, g_data_dir, &restoreCopied, &restoreFailed, &restoreExpected);
-        if (okMain && okArchive) {
-            MessageBoxW(hwnd, L"导入过程中发生错误，当前数据已从自动备份恢复。", L"导入失败", MB_OK | MB_ICONERROR);
-        } else {
-            MessageBoxW(hwnd, L"导入和自动恢复均未完整完成。请保留自动备份目录并手动恢复。", L"严重错误", MB_OK | MB_ICONERROR);
-        }
-        return 0;
-    }
-
-    repair_settings_recovery_chain();
-    load_settings_preserving_runtime();
-    pomodoro_count = get_today_count_from_storage();
-    refresh_today_count_if_day_changed(hwnd, 1);
-    load_heatmap_data();
-    if (g_hHeatmapWnd) InvalidateRect(g_hHeatmapWnd, NULL, TRUE);
-    refresh_timer_icon_by_state(hwnd);
-    swprintf(msg, 384, L"导入完成：成功 %d/%d。\n导入前数据已备份到:\n%ls", copied, expected, backupDir);
-    MessageBoxW(hwnd, msg, L"导入完成", MB_OK | MB_ICONINFORMATION);
-    return 1;
+    if(!data_operation_begin(hwnd))return 0;int ok=data_import_transaction(hwnd);data_operation_busy=0;return ok;
 }
-
-static void maybe_archive_log_monthly(void) {
-    WIN32_FILE_ATTRIBUTE_DATA fad;
-    ULONGLONG size;
-    FILE* in;
-    FILE* keep;
-    wchar_t keepPath[MAX_PATH];
-    time_t now;
-    struct tm* tmNow;
-    char line[256];
-
-    if (!GetFileAttributesExW(g_log_path, GetFileExInfoStandard, &fad)) return;
-    size = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
-    if (size < (ULONGLONG)(2 * 1024 * 1024)) return;
-
-    in = _wfopen(g_log_path, L"r");
-    if (!in) return;
-
-    swprintf(keepPath, MAX_PATH, L"%ls.keep", g_log_path);
-    keep = _wfopen(keepPath, L"w");
-    if (!keep) {
-        fclose(in);
-        return;
-    }
-
-    now = time(NULL);
-    tmNow = localtime(&now);
-
-    while (fgets(line, sizeof(line), in)) {
-        int y, m, d, hh, mm, ss;
-        if (sscanf(line, "%d-%d-%d,%d:%d:%d", &y, &m, &d, &hh, &mm, &ss) == 6) {
-            if (tmNow && y == (tmNow->tm_year + 1900) && m == (tmNow->tm_mon + 1)) {
-                fputs(line, keep);
-            } else {
-                wchar_t monthPath[MAX_PATH];
-                FILE* monthFp;
-                swprintf(monthPath, MAX_PATH, L"%ls\\pomodoro_log_%04d-%02d.csv", g_data_dir, y, m);
-                monthFp = _wfopen(monthPath, L"a");
-                if (monthFp) {
-                    fputs(line, monthFp);
-                    fclose(monthFp);
-                } else {
-                    fputs(line, keep);
-                }
-            }
-        } else {
-            fputs(line, keep);
-        }
-    }
-
-    fclose(in);
-    fclose(keep);
-    MoveFileExW(keepPath, g_log_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+static int export_data_to_folder(HWND hwnd) {
+    if(!data_operation_begin(hwnd))return 0;int ok=export_data_to_folder_impl(hwnd);data_operation_busy=0;return ok;
 }
-
-static void load_archive_logs(void) {
-    WIN32_FIND_DATAW ffd;
-    HANDLE hFind;
-    wchar_t pattern[MAX_PATH];
-    wchar_t filePath[MAX_PATH];
-    FILE* fp;
-    char line[128];
-
-    swprintf(pattern, MAX_PATH, L"%ls\\pomodoro_log_*.csv", g_data_dir);
-    hFind = FindFirstFileW(pattern, &ffd);
-    if (hFind == INVALID_HANDLE_VALUE) return;
-
-    do {
-        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        swprintf(filePath, MAX_PATH, L"%ls\\%ls", g_data_dir, ffd.cFileName);
-        fp = _wfopen(filePath, L"r");
-        if (!fp) continue;
-        while (fgets(line, sizeof(line), fp)) {
-            char date[11] = {0};
-            int completedCount = 1;
-            if (!parse_pomodoro_log_entry(line, date, &completedCount)) continue;
-            add_day_count(g_day_counts, &g_day_count, date, completedCount);
-        }
-        fclose(fp);
-    } while (FindNextFileW(hFind, &ffd));
-
-    FindClose(hFind);
+static int switch_data_location(HWND hwnd,DataLocationMode mode,const wchar_t *path) {
+    if(!data_operation_begin(hwnd))return 0;int ok=switch_data_location_impl(hwnd,mode,path);data_operation_busy=0;return ok;
 }
 
 static void reset_defaults_keep_data(void) {
@@ -1369,12 +1188,7 @@ void init_system_metrics() {
     screenHeight = GetSystemMetrics(SM_CYSCREEN);
 }
 
-static const wchar_t* g_input_title = L"输入";
-static const wchar_t* g_input_label = L"请输入数字:";
-static int g_input_default = 0;
-static int g_input_min = 0;
-static int g_input_max = 0;
-static int g_input_result = 0;
+typedef struct { const wchar_t *title,*label; int initial,minimum,maximum,result; } IntegerInputContext;
 
 static int parse_input_integer(const wchar_t *text,int minimum,int maximum,int *result) {
     wchar_t *end;const wchar_t *begin=text;
@@ -1388,18 +1202,20 @@ static int parse_input_integer(const wchar_t *text,int minimum,int maximum,int *
 }
 
 INT_PTR CALLBACK InputDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    (void)lParam;
+    IntegerInputContext *input=(IntegerInputContext*)GetWindowLongPtrW(hwndDlg,DWLP_USER);
     switch (uMsg) {
         case WM_WINDOWPOSCHANGED:
-            if(lParam && (((WINDOWPOS*)lParam)->flags&SWP_SHOWWINDOW) && fs_active)PostMessageW(g_main_hwnd,WM_FS_MAINTAIN_LAYER,1,0);
+            if(lParam && ((((WINDOWPOS*)lParam)->flags&SWP_SHOWWINDOW) || !(((WINDOWPOS*)lParam)->flags&SWP_NOMOVE)) && fs_active)PostMessageW(g_main_hwnd,WM_FS_MAINTAIN_LAYER,1,0);
             return FALSE;
         case WM_INITDIALOG: {
             wchar_t buf[32];
-            SetWindowTextW(hwndDlg, g_input_title);
-            SetDlgItemTextW(hwndDlg, IDC_INPUT_LABEL, g_input_label);
+            input=(IntegerInputContext*)lParam;if(!input){EndDialog(hwndDlg,IDCANCEL);return TRUE;}
+            SetWindowLongPtrW(hwndDlg,DWLP_USER,(LONG_PTR)input);
+            SetWindowTextW(hwndDlg, input->title);
+            SetDlgItemTextW(hwndDlg, IDC_INPUT_LABEL, input->label);
             SetDlgItemTextW(hwndDlg, IDOK, L"确定");
             SetDlgItemTextW(hwndDlg, IDCANCEL, L"取消");
-            _itow(g_input_default, buf, 10);
+            _itow(input->initial, buf, 10);
             SetDlgItemTextW(hwndDlg, IDC_INPUT_EDIT, buf);
             center_window_on_work_area(hwndDlg);
             fs_prepare_aux_window(hwndDlg);
@@ -1412,10 +1228,10 @@ INT_PTR CALLBACK InputDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
                     MessageBoxW(hwndDlg,L"输入过长，请输入完整整数。",L"错误",MB_OK|MB_ICONERROR);return TRUE;
                 }
                 GetDlgItemTextW(hwndDlg,IDC_INPUT_EDIT,buf,64);
-                if(!parse_input_integer(buf,g_input_min,g_input_max,&value)) {
+                if(!parse_input_integer(buf,input->minimum,input->maximum,&value)) {
                     MessageBoxW(hwndDlg,L"请输入允许范围内的完整整数。",L"错误",MB_OK|MB_ICONERROR);return TRUE;
                 }
-                g_input_result = value;
+                input->result = value;
                 EndDialog(hwndDlg, IDOK);
                 return TRUE;
             }
@@ -1432,18 +1248,9 @@ INT_PTR CALLBACK InputDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
 }
 
 BOOL PromptForInteger(HWND hwndParent, const wchar_t* title, const wchar_t* label, int currentValue, int minValue, int maxValue, int* outValue) {
-    INT_PTR result;
-    g_input_title = title;
-    g_input_label = label;
-    g_input_default = currentValue;
-    g_input_min = minValue;
-    g_input_max = maxValue;
-    result = DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_INPUT), hwndParent, InputDlgProc);
-    if (result == IDOK) {
-        *outValue = g_input_result;
-        return TRUE;
-    }
-    return FALSE;
+    IntegerInputContext input={title,label,currentValue,minValue,maxValue,currentValue};
+    INT_PTR result=DialogBoxParamW(GetModuleHandle(NULL),MAKEINTRESOURCE(IDD_INPUT),hwndParent,InputDlgProc,(LPARAM)&input);
+    if(result==IDOK){*outValue=input.result;return TRUE;}return FALSE;
 }
 
 // Sets the application language and refreshes the UI
@@ -2148,7 +1955,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v3.0.7");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v3.0.9");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -2706,23 +2513,16 @@ static int stats_append_line(const wchar_t *path,const char *line) {
     return ok;
 }
 
+#include "statistics_snapshot.h"
+
 static int sync_today_count_to_target(int targetCount) {
-    time_t now = time(NULL);
-    struct tm* tmNow = localtime(&now);
-    int currentCount;
-    int delta;
-    char today[11];
-
-    if (!tmNow) return 0;
-
-    load_heatmap_data();
-    sprintf(today, "%04d-%02d-%02d", tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
-    currentCount = get_day_count_value(tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
-    delta = targetCount - currentCount;
-    if (delta == 0) return 1;
-
-    char line[96];sprintf(line,"%s,%d\n",today,delta);
-    return stats_append_line(g_adjustments_path,line);
+    int value;if(!stats_try_today(&value))return 0;
+    time_t now=time(NULL);struct tm *date=localtime(&now);if(!date)return 0;
+    char today[11];sprintf(today,"%04d-%02d-%02d",date->tm_year+1900,date->tm_mon+1,date->tm_mday);
+    if(strcmp(today,stats_snapshot_date)||_wcsicmp(g_data_dir,stats_snapshot_dir))return 0;
+    int raw=get_day_count_value(date->tm_year+1900,date->tm_mon+1,date->tm_mday);
+    LONGLONG delta=(LONGLONG)targetCount-raw;if(delta<INT_MIN||delta>INT_MAX)return 0;
+    if(!delta)return 1;char line[96];sprintf(line,"%s,%d\n",today,(int)delta);return stats_append_line(g_adjustments_path,line);
 }
 
 static int get_day_count_value(int year, int month, int day) {
@@ -2793,7 +2593,7 @@ static int parse_pomodoro_log_entry(const char* line, char date[11], int* comple
 int record_completed_pomodoros(int completedCount) {
     time_t now=time(NULL);struct tm *tmNow=localtime(&now);char line[128];
     if(!tmNow) return 0;
-    completedCount=clamp_int(completedCount,1,9999);maybe_archive_log_monthly();
+    completedCount=clamp_int(completedCount,1,9999);
     sprintf(line,"%04d-%02d-%02d,%02d:%02d:%02d,%d\n",tmNow->tm_year+1900,
         tmNow->tm_mon+1,tmNow->tm_mday,tmNow->tm_hour,tmNow->tm_min,tmNow->tm_sec,completedCount);
     int saved=stats_append_line(g_log_path,line);
@@ -2801,43 +2601,7 @@ int record_completed_pomodoros(int completedCount) {
     return saved;
 }
 
-static int get_today_count_from_storage(void) {
-    time_t now = time(NULL);
-    struct tm* tmNow = localtime(&now);
-    char today[11];
-    char line[128];
-    int count = 0;
-    FILE* in;
-    FILE* adj;
-
-    if (!tmNow) return clamp_int(pomodoro_count, 0, 9999);
-
-    sprintf(today, "%04d-%02d-%02d", tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
-
-    in = _wfopen(g_log_path, L"r");
-    if (in) {
-        while (fgets(line, sizeof(line), in)) {
-            char date[11] = {0};
-            int completedCount = 1;
-            if (!parse_pomodoro_log_entry(line, date, &completedCount)) continue;
-            if (strcmp(date, today) == 0) count += completedCount;
-        }
-        fclose(in);
-    }
-
-    adj = _wfopen(g_adjustments_path, L"r");
-    if (adj) {
-        while (fgets(line, sizeof(line), adj)) {
-            char date[11] = {0};
-            int delta = 0;
-            if (sscanf(line, "%10[^,],%d", date, &delta) != 2) continue;
-            if (strcmp(date, today) == 0) count += delta;
-        }
-        fclose(adj);
-    }
-
-    return clamp_int(count, 0, 9999);
-}
+static int get_today_count_from_storage(void) { int value;return stats_try_today(&value)?value:pomodoro_count; }
 
 static void refresh_today_count_if_day_changed(HWND hwnd, int forceRefresh) {
     time_t now = time(NULL);
@@ -2848,12 +2612,12 @@ static void refresh_today_count_if_day_changed(HWND hwnd, int forceRefresh) {
     if (!tmNow) return;
     sprintf(today, "%04d-%02d-%02d", tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
 
-    if (!forceRefresh && strcmp(g_last_count_sync_date, today) == 0) return;
+    if (!forceRefresh && !stats_needs_refresh && strcmp(g_last_count_sync_date, today) == 0) return;
 
+    if(!stats_try_today(&newCount))return;
+    stats_needs_refresh=0;
     strncpy(g_last_count_sync_date, today, 10);
     g_last_count_sync_date[10] = '\0';
-
-    newCount = get_today_count_from_storage();
     if (newCount != pomodoro_count) {
         pomodoro_count = newCount;
         save_settings();
@@ -2864,83 +2628,7 @@ static void refresh_today_count_if_day_changed(HWND hwnd, int forceRefresh) {
     }
 }
 
-static void load_heatmap_data(void) {
-    FILE* in = _wfopen(g_log_path, L"r");
-    FILE* adj = _wfopen(g_adjustments_path, L"r");
-    time_t now = time(NULL);
-    struct tm* tmNow = localtime(&now);
-    char line[128];
-    int i;
-
-    g_day_count = 0;
-
-    g_heatmap_weekTotal = 0;
-    g_heatmap_monthTotal = 0;
-    g_heatmap_yearTotal = 0;
-    g_heatmap_total = 0;
-
-    if (!tmNow) {
-        return;
-    }
-
-    if (g_heatmap_display_year == 0 || g_heatmap_display_month == 0) {
-        g_heatmap_display_year = tmNow->tm_year + 1900;
-        g_heatmap_display_month = tmNow->tm_mon + 1;
-    }
-
-    if (in) {
-        while (fgets(line, sizeof(line), in)) {
-            char date[11] = {0};
-            int completedCount = 1;
-
-            if (!parse_pomodoro_log_entry(line, date, &completedCount)) continue;
-            add_day_count(g_day_counts, &g_day_count, date, completedCount);
-        }
-        fclose(in);
-    }
-
-    load_archive_logs();
-
-    if (adj) {
-        while (fgets(line, sizeof(line), adj)) {
-            char date[11] = {0};
-            int delta = 0;
-            if (sscanf(line, "%10[^,],%d", date, &delta) != 2) continue;
-            add_day_count(g_day_counts, &g_day_count, date, delta);
-        }
-        fclose(adj);
-    }
-
-    for (i = 0; i < g_day_count; ++i) {
-        int y = 0, m = 0, d = 0;
-        int c;
-        struct tm tmEntry = {0};
-        time_t entryTime;
-        double deltaDays;
-
-        if (sscanf(g_day_counts[i].date, "%d-%d-%d", &y, &m, &d) != 3) continue;
-        c = g_day_counts[i].count;
-        if (c < 0) c = 0;
-        g_day_counts[i].count = c;
-
-        tmEntry.tm_year = y - 1900;
-        tmEntry.tm_mon = m - 1;
-        tmEntry.tm_mday = d;
-        tmEntry.tm_hour = 12;
-        entryTime = mktime(&tmEntry);
-        deltaDays = difftime(now, entryTime) / (60.0 * 60.0 * 24.0);
-
-        g_heatmap_total += c;
-        if (y == (tmNow->tm_year + 1900)) g_heatmap_yearTotal += c;
-        if (y == (tmNow->tm_year + 1900) && m == (tmNow->tm_mon + 1)) g_heatmap_monthTotal += c;
-        if (deltaDays >= 0.0 && deltaDays < 7.0) g_heatmap_weekTotal += c;
-    }
-
-    g_heatmap_total = clamp_int(g_heatmap_total, 0, 999999);
-    g_heatmap_yearTotal = clamp_int(g_heatmap_yearTotal, 0, 999999);
-    g_heatmap_monthTotal = clamp_int(g_heatmap_monthTotal, 0, 999999);
-    g_heatmap_weekTotal = clamp_int(g_heatmap_weekTotal, 0, 999999);
-}
+static int load_heatmap_data(void) { int value;return stats_try_today(&value); }
 
 static HWND g_hHeatmapPrevBtn = NULL;
 static HWND g_hHeatmapTodayBtn = NULL;
@@ -2986,7 +2674,7 @@ static void heatmap_layout_children(HWND hwnd, UINT dpi) {
 LRESULT CALLBACK HeatmapWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_WINDOWPOSCHANGED:
-            if(lParam && (((WINDOWPOS*)lParam)->flags&SWP_SHOWWINDOW) && fs_active)PostMessageW(g_main_hwnd,WM_FS_MAINTAIN_LAYER,1,0);
+            if(lParam && ((((WINDOWPOS*)lParam)->flags&SWP_SHOWWINDOW) || !(((WINDOWPOS*)lParam)->flags&SWP_NOMOVE)) && fs_active)PostMessageW(g_main_hwnd,WM_FS_MAINTAIN_LAYER,1,0);
             break;
         case WM_CREATE: {
             UINT dpi = app_get_window_dpi(hwnd);
@@ -3864,8 +3552,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
         case WM_FS_MAINTAIN_LAYER:
-            fs_maintain_layer((int)wParam);
             InterlockedExchange(&fs_maintain_scheduled, 0);
+            fs_maintain_layer((int)wParam);
             return 0;
         case 0x02E0: /* Main/tray DPI changed. */
             refresh_timer_icon_by_state(hwnd);return 0;
@@ -3892,6 +3580,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             fs_in_menu_loop = 0;
             return 0;
         case WM_TIMER:
+            if (wParam == ID_LAYER_GUARD_TIMER) { fs_maintain_layer(0);return 0; }
             if (wParam == ID_STRONG_REMINDER_TIMER) { sr_tick(); return 0; }
             if (wParam == ID_TIMER_CLOCK) { timer_sync_clock(hwnd); return 0; }
             if (wParam == ID_FS_REFRESH) { fs_refresh(); return 0; }
@@ -3907,7 +3596,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // Clean up before exit
             td_stop();
             sr_dismiss(0);
-            fs_exit();
+            fs_shutdown();
             KillTimer(hwnd, ID_MAIN_DAY_SYNC_TIMER);
             tray_cancel_retry(hwnd);
             stop_timer_clock();
@@ -3930,6 +3619,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 } else if (settings.reminder_mode == 1 && !fs_active)
                     ShowCompletionNotification(hwnd, (int)wParam);
             }
+            return 0;
+        case WM_STATS_READ_FAILED:
+            if(stats_read_warning==1)MessageBoxW(hwnd,L"统计暂时无法完整读取，已保留上次有效显示。请检查数据文件是否被占用。",L"统计读取失败",MB_OK|MB_ICONERROR);
+            return 0;
+        case WM_SETTINGS_RECOVERY_FAILED:
+            MessageBoxW(hwnd,wParam?L"设置已保存，备份更新失败。可用恢复文件已保留。":L"已读取可用配置，但文件恢复未完整完成。可用恢复文件已保留。",L"配置恢复提示",MB_OK|MB_ICONWARNING);
             return 0;
         case WM_STATS_SAVE_FAILED:
             MessageBoxW(hwnd, L"本次番茄统计保存失败，请检查数据目录；可通过修改今日番茄数修正。", L"统计保存失败", MB_OK | MB_ICONERROR);
@@ -3957,56 +3652,7 @@ static int extract_json_int(const char* buf, const char* key, int defaultValue) 
     return pos && settings_json_number(&pos, &value) ? value : defaultValue;
 }
 
-static int read_settings_json_buffer(char* buf, size_t bufSize) {
-    FILE* fp;
-    size_t n;
-    int complete;
-    if (!buf || bufSize == 0) return 0;
-    buf[0] = '\0';
-
-    fp = _wfopen(g_settings_path, L"r");
-    if (fp) {
-        n = fread(buf, 1, bufSize - 1, fp);
-        complete = fgetc(fp) == EOF && !ferror(fp);
-        fclose(fp);
-        if (n > 0 && complete) {
-            buf[n] = '\0';
-            if (settings_json_valid(buf)) {
-                return 1;
-            }
-        }
-    }
-
-    fp = _wfopen(g_settings_tmp_path, L"r");
-    if (fp) {
-        n = fread(buf, 1, bufSize - 1, fp);
-        complete = fgetc(fp) == EOF && !ferror(fp);
-        fclose(fp);
-        if (n > 0 && complete) {
-            buf[n] = '\0';
-            if (settings_json_valid(buf)) {
-                MoveFileExW(g_settings_tmp_path, g_settings_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-                return 1;
-            }
-        }
-    }
-
-    fp = _wfopen(g_settings_bak_path, L"r");
-    if (fp) {
-        n = fread(buf, 1, bufSize - 1, fp);
-        complete = fgetc(fp) == EOF && !ferror(fp);
-        fclose(fp);
-        if (n > 0 && complete) {
-            buf[n] = '\0';
-            if (settings_json_valid(buf)) {
-                CopyFileW(g_settings_bak_path, g_settings_path, FALSE);
-                return 1;
-            }
-        }
-    }
-
-    return 0;
-}
+static int read_settings_json_buffer(char *buf,size_t size) { return config_recover_read(buf,size); }
 
 void load_settings() {
     if (g_settings_lock_ready) EnterCriticalSection(&g_settings_file_lock);
@@ -4132,11 +3778,8 @@ int save_settings(void) {
 
     if (g_settings_lock_ready) EnterCriticalSection(&g_settings_file_lock);
 
-    if (GetFileAttributesW(g_settings_bak_path) == INVALID_FILE_ATTRIBUTES) {
-        CopyFileW(g_settings_path, g_settings_bak_path, TRUE);
-    }
-
-    FILE* fp = _wfopen(g_settings_tmp_path, L"w");
+    wchar_t staged[MAX_PATH]={0};
+    FILE* fp=GetTempFileNameW(g_data_dir,L"pmc",0,staged)?_wfopen(staged,L"wb"):NULL;
     if (fp) {
         writeOk = fprintf(fp, "{\"pomodoro_duration\":%d,\"long_pomodoro_duration\":%d,\"long_pomodoro_count\":%d,\"short_pomodoro_duration\":%d,\"short_break_duration\":%d,\"long_break_duration\":%d,\"custom_duration\":%d,\"adjust_block_minutes\":%d,\"enable_toast_auto_collapse\":%d,\"enable_clock_sound\":%d,\"enable_completion_sound\":%d,\"reminder_mode\":%d,\"default_pomodoro_is_long\":%d,\"default_break_is_long\":%d,\"enable_pomodoro_count\":%d,\"enable_overtime_count_up\":%d,\"pomodoro_count\":%d,\"idle_mode\":%d,\"idle_pomodoro_is_long\":%d,\"idle_break_is_long\":%d,\"fullscreen_focus_color\":%d,\"fullscreen_break_color\":%d,\"fullscreen_count_up_color\":%d,\"fullscreen_custom_color\":%d,\"fullscreen_overtime_color\":%d,\"fullscreen_signature_color\":%d,\"fullscreen_focus_scale\":%d,\"fullscreen_break_scale\":%d,\"fullscreen_count_up_scale\":%d,\"fullscreen_custom_scale\":%d,\"fullscreen_overtime_scale\":%d,\"fullscreen_signature_scale\":%d,\"fullscreen_show_text\":%d,\"fullscreen_show_signature\":%d,\"fullscreen_show_mouse_tips\":%d",
             longDuration, longDuration, settings.long_pomodoro_count, settings.short_pomodoro_duration,
@@ -4163,19 +3806,21 @@ int save_settings(void) {
                                settings_json_write_string(fp, settings.fullscreen_signature) &&
                                fputc('}', fp) != EOF;
         if (writeOk && fflush(fp) != 0) writeOk = 0;
+        if (writeOk && _commit(_fileno(fp)) != 0) writeOk = 0;
         if (fclose(fp) != 0) writeOk = 0;
 
-        if (writeOk && MoveFileExW(g_settings_tmp_path, g_settings_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-            saved = 1;
-        } else if (writeOk && CopyFileW(g_settings_tmp_path, g_settings_path, FALSE)) {
-            DeleteFileW(g_settings_tmp_path);
-            saved = 1;
-        }
-
-        if (saved) {
-            CopyFileW(g_settings_path, g_settings_bak_path, FALSE);
+        if(writeOk){char bytes[8192];
+            if(config_read_valid(staged,bytes,sizeof(bytes)) && config_write_atomic(g_settings_tmp_path,bytes)){
+                saved=config_write_atomic(g_settings_path,bytes);
+                if(saved){int backup=config_write_atomic(g_settings_bak_path,bytes);
+                    if(backup&&config_matches(g_settings_path,bytes)&&config_matches(g_settings_bak_path,bytes)){
+                        if(config_matches(g_settings_tmp_path,bytes))DeleteFileW(g_settings_tmp_path);config_warning=0;
+                    }else config_warn(1);
+                }
+            }
         }
     }
+    if(staged[0])DeleteFileW(staged);
 
     if (g_settings_lock_ready) LeaveCriticalSection(&g_settings_file_lock);
 

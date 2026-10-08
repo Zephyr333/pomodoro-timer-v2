@@ -41,11 +41,11 @@ static void repair_editor_preview(void) {
     FullscreenColorDraft draft={0};draft.index=0;draft.color=settings.fullscreen_colors[0];draft.scale=100;wcscpy(draft.font,L"Segoe UI");
     HWND editor=CreateDialogParamW(GetModuleHandleW(NULL),MAKEINTRESOURCEW(IDD_FULLSCREEN_COLORS),g_main_hwnd,FullscreenColorsDlgProc,(LPARAM)&draft);
     ShowWindow(editor,SW_SHOW);SetActiveWindow(editor);SetFocus(GetDlgItem(editor,IDC_FS_EDIT_FIRST));fs_enforce_topmost();
-    CHECK(repair_above(editor,fs_windows[0])==1&&!GetPropW(editor,fs_aux_topmost_prop),"existing topmost editor remains protected without recording a false promotion");
+    CHECK(repair_above(editor,fs_windows[0])==1&&GetPropW(editor,fs_aux_topmost_prop),"normal editor receives temporary fullscreen protection");
     FullscreenView view;fs_read_timer_view(&view);fs_start_preview(editor,IDC_FS_EDIT_FIRST,&view);
     CHECK(fs_preview_active&&fs_count==online.count&&!IsWindowVisible(editor),"preview still covers all online screens and hides editor");
     fs_end_preview();CHECK(!fs_preview_active&&fs_count==1&&IsWindowVisible(editor)&&GetFocus()==GetDlgItem(editor,IDC_FS_EDIT_FIRST),"preview returns to original selection and editor input focus");
-    fs_exit();CHECK(GetWindowLongW(editor,GWL_EXSTYLE)&WS_EX_TOPMOST,"originally topmost editor is not demoted by fullscreen cleanup");
+    fs_exit();CHECK(!(GetWindowLongW(editor,GWL_EXSTYLE)&WS_EX_TOPMOST),"editor protection is removed by fullscreen cleanup");
     DestroyWindow(editor);if(draft.preview_font)DeleteObject(draft.preview_font);fs_editor_dialog=NULL;
 }
 static void repair_prefix_pixels(HDC dc,RECT bounds,int plus) {
