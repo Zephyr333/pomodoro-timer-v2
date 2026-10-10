@@ -22,13 +22,13 @@ static void test_ui_copy(void) {
         is_running = 0; is_paused = 1;
         fs_read_timer_view(&view);
         swprintf(text, 96, L"%ls · 已暂停", timer_mode_name(modes[i]));
-        CHECK(!wcscmp(view.status, text) && !wcscmp(timer_ui_pause_label(), L"继续") && !wcscmp(timer_ui_primary_label(), L"结束"), "paused uses shared status and continue");
+        CHECK(!wcscmp(view.status, text) && !wcscmp(timer_ui_pause_label(), L"暂停") && !wcscmp(timer_ui_primary_label(), L"开始"), "paused uses shared status and continue");
         is_paused = 0; is_running = 1; is_overtime = 1; overtime_source_mode = modes[i]; overtime_seconds = 11;
         fs_read_timer_view(&view);
         CHECK(!wcscmp(view.status, L"超时正计时") && !wcscmp(view.time, L"+00:11"), "all overtime sources share one mode name");
         is_running = 0; is_paused = 1;
         fs_read_timer_view(&view);
-        CHECK(!wcscmp(view.status, L"超时正计时 · 已暂停") && !wcscmp(timer_ui_primary_label(), L"开始"), "paused overtime begins next segment rather than showing continue in HUD");
+        CHECK(!wcscmp(view.status, L"超时正计时 · 已暂停") && !wcscmp(timer_ui_primary_label(), L"开始"), "paused overtime exposes start to resume the current clock");
         is_paused = 0; is_overtime = 0;
     }
     timer_test_reset();
@@ -43,14 +43,14 @@ static void test_ui_copy(void) {
     fs_read_timer_view(&view);
     CHECK(!wcscmp(view.status, L"短番茄钟 · 未开始") && !wcscmp(view.time, L"30:00"), "completed micro uses common completion state");
     CHECK(timer_ui_can_start() && !timer_ui_can_pause() && !timer_ui_can_end(), "static post-micro waiting has one progression action");
-    choose_menu(ID_MENU_STOP);
-    CHECK(micro.phase == MICRO_WAIT_RESUME && micro.frozen_seconds == 1800, "disabled end command cannot bypass waiting restriction");
+    choose_menu(0);
+    CHECK(micro.phase == MICRO_WAIT_RESUME && micro.frozen_seconds == 1800, "opening menu preserves waiting; standalone end command no longer exists");
     MicroPhase phases[] = {MICRO_WAIT_START, MICRO_WAIT_RESUME};
     for (i = 0; i < 2; ++i) {
         micro.phase = phases[i]; is_overtime = 1; is_running = 1; overtime_seconds = 9;
         CHECK(timer_ui_can_pause(), "micro-derived overtime offers pause");
         choose_menu(ID_MENU_PAUSE_RESUME);
-        CHECK(is_paused && !is_running && !wcscmp(timer_ui_pause_label(), L"继续"), "micro overtime actually pauses");
+        CHECK(is_paused && !is_running && !wcscmp(timer_ui_pause_label(), L"暂停"), "micro overtime actually pauses");
         CHECK(timer_ui_can_start() && timer_ui_can_end(), "paused overtime start and end availability");
         choose_menu(ID_MENU_PAUSE_RESUME);
         CHECK(is_running && !is_paused && overtime_seconds == 9 && micro.frozen_seconds == 1800, "continue retains overtime and frozen focus");

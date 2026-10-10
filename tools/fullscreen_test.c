@@ -24,9 +24,10 @@ static BOOL WINAPI test_shell_notify(DWORD message,PNOTIFYICONDATAW data) {
 }
 #define Shell_NotifyIconW test_shell_notify
 static HWND test_timer_owner;
-static int test_timer_tracking;
+static int test_timer_tracking,test_resume_fail;
 static unsigned test_main_timers;
 static UINT_PTR WINAPI test_set_timer(HWND owner,UINT_PTR id,UINT interval,TIMERPROC proc) {
+    if(test_resume_fail&&id==4005)return 0;
     UINT_PTR result=SetTimer(owner,id,interval,proc);
     if(result && test_timer_tracking && owner==test_timer_owner && id>=4001 && id<=4010)test_main_timers|=1u<<(id-4001);
     return result;
@@ -136,6 +137,7 @@ static BOOL WINAPI test_track_popup_menu(HMENU menu, UINT flags, int x, int y, i
         if (child) for (j = 0; j < GetMenuItemCount(child); ++j)
             CHECK(GetSubMenu(child, j) == NULL, "menu depth does not exceed two levels");
     }
+    CHECK(!!(GetMenuState(session,ID_MENU_PAUSE_RESUME,MF_BYCOMMAND)&MF_CHECKED)==!!is_paused,"pause checkmark exactly reflects current state");
     CHECK(GetMenuItemCount(session) == 2, "fullscreen moved out of session menu");
     { int commands[]={ID_MENU_IDLE_POMODORO,ID_MENU_IDLE_SHORT_POMODORO,ID_MENU_IDLE_SHORT_BREAK,ID_MENU_IDLE_LONG_BREAK,ID_MENU_IDLE_COUNT_UP,ID_MENU_IDLE_CUSTOM};
       int n;HMENU idle=GetSubMenu(menu,2);
@@ -756,6 +758,7 @@ static void test_reminder_menu(void) {
 }
 
 #include "harden_test.h"
+#include "resume_test.h"
 
 int wmain(int argc, wchar_t **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -768,7 +771,7 @@ int wmain(int argc, wchar_t **argv) {
     HANDLE old_dpi;
     HHOOK trace_hook;
     HDESK test_desktop = NULL;
-    int interactive = 0, stress = 0, ui_copy_only = 0, ready_only = 0, ux_only = 0, flexible_only = 0, micro_preview_only = 0, surface_only = 0, click_only = 0, wait_overtime_only = 0, strong_only = 0, reminder_menu_only = 0, consistency_only = 0, reliability_only = 0, tray_layout_only = 0, visual_only = 0, repair_only = 0, harden_only=0, seal_only=0, guard_live=-1, focus_live=0;
+    int interactive = 0, stress = 0, ui_copy_only = 0, ready_only = 0, ux_only = 0, flexible_only = 0, micro_preview_only = 0, surface_only = 0, click_only = 0, wait_overtime_only = 0, strong_only = 0, reminder_menu_only = 0, consistency_only = 0, reliability_only = 0, tray_layout_only = 0, visual_only = 0, repair_only = 0, resume_only=0, harden_only=0, seal_only=0, guard_live=-1, focus_live=0;
     if (argc < 2 || wcsncmp(argv[1], L"tools\\.fullscreen-test\\", 23) != 0 || wcsstr(argv[1], L"..")) {
         /* Require the script's relative output path, not a personal data path. */
         fprintf(stderr, "Usage: fullscreen_test.exe tools\\.fullscreen-test\\run-id\n"); return 2;
@@ -793,6 +796,7 @@ int wmain(int argc, wchar_t **argv) {
         if (!wcscmp(argv[i], L"--repair-only")) repair_only = 1;
         if(!wcscmp(argv[i],L"--seal-only"))seal_only=1;
         if(!wcscmp(argv[i],L"--harden-only"))harden_only=1;
+        if(!wcscmp(argv[i],L"--resume-only"))resume_only=1;
         if(!wcscmp(argv[i],L"--guard-live")&&i+1<argc)guard_live=_wtoi(argv[++i]);
         if(!wcscmp(argv[i],L"--focus-live"))focus_live=1;
     }
@@ -837,8 +841,8 @@ int wmain(int argc, wchar_t **argv) {
     trace_hook = SetWindowsHookExW(WH_CALLWNDPROC, trace_window_messages, NULL, GetCurrentThreadId());
     CHECK(trace_hook != NULL, "window lifecycle observer installed");
 
-    if (ui_copy_only || ready_only || ux_only || flexible_only || micro_preview_only || surface_only || click_only || wait_overtime_only || strong_only || reminder_menu_only || consistency_only || reliability_only || tray_layout_only || visual_only || repair_only || harden_only || seal_only || guard_live>=0 || focus_live) {
-        if(harden_only)test_harden();else if(guard_live>=0)test_guard_live(guard_live); else if(focus_live)test_focus_live(); else if(seal_only)test_seal_fixes(); else if(repair_only)test_gui_repairs(); else if(visual_only){visual_live_desktop=interactive;test_visual_stability();} else if(tray_layout_only){TimerSettings saved=settings;consistency_reset();reliability_icon_sheet();settings=saved;printf("TRAY_LAYOUT_TEST: %s (%d failures)\n",failures ? "FAIL" : "PASS",failures);} else if (reliability_only) test_reliability(); else if (consistency_only) test_session_consistency(); else if (reminder_menu_only) test_reminder_menu(); else if (strong_only) test_strong_reminder(); else if (wait_overtime_only) test_micro_wait_overtime(); else if (click_only) test_fullscreen_clicks(); else if (surface_only) test_surface_bugs(); else if (micro_preview_only) test_micro_preview(); else if (flexible_only) test_flexible_controls(); else if (ux_only) test_ux_consistency(); else if (ready_only) test_ready_states(); else test_ui_copy();
+    if (ui_copy_only || ready_only || ux_only || flexible_only || micro_preview_only || surface_only || click_only || wait_overtime_only || strong_only || reminder_menu_only || consistency_only || reliability_only || tray_layout_only || visual_only || repair_only || resume_only || harden_only || seal_only || guard_live>=0 || focus_live) {
+        if(resume_only)test_resume();else if(harden_only)test_harden();else if(guard_live>=0)test_guard_live(guard_live); else if(focus_live)test_focus_live(); else if(seal_only)test_seal_fixes(); else if(repair_only)test_gui_repairs(); else if(visual_only){visual_live_desktop=interactive;test_visual_stability();} else if(tray_layout_only){TimerSettings saved=settings;consistency_reset();reliability_icon_sheet();settings=saved;printf("TRAY_LAYOUT_TEST: %s (%d failures)\n",failures ? "FAIL" : "PASS",failures);} else if (reliability_only) test_reliability(); else if (consistency_only) test_session_consistency(); else if (reminder_menu_only) test_reminder_menu(); else if (strong_only) test_strong_reminder(); else if (wait_overtime_only) test_micro_wait_overtime(); else if (click_only) test_fullscreen_clicks(); else if (surface_only) test_surface_bugs(); else if (micro_preview_only) test_micro_preview(); else if (flexible_only) test_flexible_controls(); else if (ux_only) test_ux_consistency(); else if (ready_only) test_ready_states(); else test_ui_copy();
         if (trace_hook) UnhookWindowsHookEx(trace_hook);
         DestroyWindow(g_main_hwnd);
         if (test_desktop) CloseDesktop(test_desktop);

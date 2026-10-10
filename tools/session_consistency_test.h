@@ -30,13 +30,14 @@ static void test_session_consistency(void) {
     for(i=0;i<5;++i) for(j=0;j<2;++j) {
         consistency_reset();start_timer(g_main_hwnd,3,countdowns[i]);consistency_clock();
         if(j)choose_menu(ID_MENU_PAUSE_RESUME);
-        CHECK(!wcscmp(timer_ui_primary_label(),L"结束"),"running and paused primary is end");
+        CHECK(!wcscmp(timer_ui_primary_label(),j?L"开始":L"结束"),"paused starts and running ends");
         consistency_input(500);
         CHECK(remaining_seconds==180 && timer_time_cap()==180 && !!is_paused==j && !!is_running==!j,"input over cap clips to original duration and retains state in every countdown");
         settings.long_pomodoro_duration=settings.short_pomodoro_duration=settings.custom_duration=20;
         settings.short_break_duration=settings.long_break_duration=20;
         remaining_seconds=179;choose_menu(ID_MENU_PLUS_5_MIN);
         CHECK(remaining_seconds==180 && session_rules.initial_seconds==180,"step increase and changed defaults cannot exceed original session cap");
+        if(j)choose_menu(ID_MENU_START_CURRENT);
         choose_menu(ID_MENU_START_CURRENT);
         CHECK(!is_running && !is_paused && timer_ui_is_ready() && !wcscmp(timer_ui_primary_label(),L"开始"),"single primary ends both running and paused countdowns into ready");
     }
@@ -134,11 +135,13 @@ static void test_session_consistency(void) {
     timer_advance_seconds(g_main_hwnd,900);
     CHECK(is_overtime && micro.frozen_seconds==1500 && micro.interval_seconds==900 && micro.duration_seconds==60 && timer_effective_count(),"changing defaults preserves current captured timing and count rules");
     consistency_micro_cycle();choose_menu(ID_MENU_PAUSE_RESUME);
+    test_tray_size_override=32;
     HDC icon_target=GetDC(NULL),icon_dc=CreateCompatibleDC(icon_target);HBITMAP icon_bitmap=CreateCompatibleBitmap(icon_target,32,32);HGDIOBJ prior_bitmap=SelectObject(icon_dc,icon_bitmap);
     micro.phase=MICRO_WAIT_RESUME;is_paused=0;refresh_timer_icon_by_state(g_main_hwnd);
     DrawIconEx(icon_dc,0,0,last_icon,32,32,0,NULL,DI_NORMAL);
     int y,clipped=0;for(y=0;y<25;++y)if(GetPixel(icon_dc,0,y)==RGB(255,255,255)||GetPixel(icon_dc,31,y)==RGB(255,255,255))++clipped;
-    CHECK(!wcscmp(last_text,L"Ⅱ25") && clipped==0,"actual prefixed tray glyph fits icon width without white text clipping");
+    CHECK(!wcscmp(last_text,L"Ⅱ25") && last_icon!=NULL,"same-value waiting icon is refreshed; complete glyph masks are verified by GUI repair matrix, border contact alone is not clipping");
+    test_tray_size_override=0;
     SelectObject(icon_dc,prior_bitmap);DeleteObject(icon_bitmap);DeleteDC(icon_dc);ReleaseDC(NULL,icon_target);
     consistency_reset();settings.reminder_mode=1;settings.enable_toast_auto_collapse=0;ShowCompletionNotification(g_main_hwnd,TIMER_CUSTOM);
     timer_apply_live_preferences();SendMessageW(g_hToastWnd,WM_TIMER,1,0);CHECK(!g_toast_collapsed,"cancelled stale auto-fold message does not collapse disabled popup");

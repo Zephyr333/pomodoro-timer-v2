@@ -1955,7 +1955,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v3.0.9");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v3.0.10");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -3022,7 +3022,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_hMenu = hMenu; // Store menu handle for language updates
 
                 AppendMenu(hControlMenu, MF_STRING, ID_MENU_START_CURRENT, timer_ui_primary_label());
-                AppendMenu(hControlMenu, MF_STRING | (timer_ui_can_pause() ? MF_ENABLED : MF_GRAYED), ID_MENU_PAUSE_RESUME, timer_ui_pause_label());
+                AppendMenu(hControlMenu, MF_STRING | (is_paused ? MF_CHECKED : 0) | (timer_ui_can_pause() ? MF_ENABLED : MF_GRAYED), ID_MENU_PAUSE_RESUME, timer_ui_pause_label());
 
                 AppendMenu(hStartMenu, MF_STRING, 1, L"开始长番茄钟");
                 AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_SHORT_POMODORO, L"开始短番茄钟");
@@ -3164,18 +3164,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         if (timer_ui_can_start()) timer_primary_action(hwnd);
                         break;
                     case ID_MENU_PAUSE_RESUME:
-                        timer_sync_clock(hwnd);
-                        if (!timer_ui_can_pause()) break;
-                        sr_dismiss(1);
-                        if (is_running) {
-                            stop_timer_clock();
-                            is_paused = 1;
-                        } else if (is_paused) {
-                            is_paused = 0;
-                            is_running = 1;
-                            launch_timer_clock(hwnd);
-                        }
-                        refresh_timer_icon_by_state(hwnd);
+                        timer_pause_toggle(hwnd);
                         break;
                     case ID_MENU_STOP: /* Legacy command is routed through the same primary action. */
                         timer_primary_action(hwnd);

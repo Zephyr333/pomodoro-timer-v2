@@ -275,8 +275,17 @@ static void timer_stop_action(HWND hwnd) {
     if (fs_active) fs_refresh();
 }
 
+static void timer_pause_toggle(HWND hwnd) {
+    timer_sync_clock(hwnd);if(!timer_ui_can_pause())return;
+    sr_dismiss(1);
+    if(is_paused){is_paused=0;is_running=1;launch_timer_clock(hwnd);}
+    else if(is_running){stop_timer_clock();is_paused=1;}
+    refresh_timer_icon_by_state(hwnd);if(fs_active)fs_refresh();
+}
+
 static void timer_primary_action(HWND hwnd) {
     timer_sync_clock(hwnd);
+    if(is_paused){timer_pause_toggle(hwnd);return;}
     if (is_overtime) {
         if(micro.phase==MICRO_WAIT_START) timer_start_micro(hwnd);
         else if(micro.phase==MICRO_WAIT_RESUME) timer_restore_focus(hwnd);

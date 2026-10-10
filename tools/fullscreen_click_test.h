@@ -17,7 +17,7 @@ static void test_fullscreen_clicks(void) {
     wcscpy(removed_identity,((FullscreenMonitor *)GetWindowLongPtrW(clicked,GWLP_USERDATA))->identity);
     HWND kept=initial>1 ? fs_windows[0] : NULL;
     fs_mouse_hint(hint,192);
-    CHECK(wcsstr(hint,L"左键：退出此屏") && wcsstr(hint,L"中键 / Esc：退出全部") && wcsstr(hint,L"右键：继续") && wcsstr(hint,L"中键点击托盘：全部全屏"),"ordinary mouse hint matches actual single-screen and all-screen actions");
+    CHECK(wcsstr(hint,L"左键：退出此屏") && wcsstr(hint,L"中键 / Esc：退出全部") && wcsstr(hint,L"右键：开始") && wcsstr(hint,L"中键点击托盘：全部全屏"),"ordinary mouse hint matches actual single-screen and all-screen actions");
     SendMessageW(clicked,WM_LBUTTONDOWN,0,0);
     CHECK(!IsWindow(clicked) && fs_window_index(removed_identity)<0,"left click removes only the clicked device");
     if(initial>1) CHECK(fs_active && fs_count==initial-1 && IsWindow(kept),"left click leaves other overlay windows intact");
@@ -27,10 +27,13 @@ static void test_fullscreen_clicks(void) {
     SendMessageW(fs_windows[0],WM_MBUTTONDOWN,0,0);click_check_teardown();
     fs_show_all();SendMessageW(fs_windows[0],WM_KEYDOWN,VK_ESCAPE,0);click_check_teardown();
     /* An owned hidden window proves the existing restoration path is exercised. */
-    HWND hidden=CreateWindowExW(WS_EX_TOOLWINDOW,L"STATIC",L"owned hidden fixture",WS_POPUP,0,0,40,40,NULL,NULL,GetModuleHandleW(NULL),NULL);
-    fs_begin();fs_add_screen(&online.items[0]);fs_record_hidden_window(hidden);
-    SendMessageW(fs_windows[0],WM_LBUTTONDOWN,0,0);click_check_teardown();
-    CHECK(IsWindowVisible(hidden),"closing last screen restores recorded hidden window");DestroyWindow(hidden);
+    WNDCLASSW fixture={0};fixture.hInstance=GetModuleHandleW(NULL);fixture.lpfnWndProc=DefWindowProcW;fixture.lpszClassName=L"DFTaskbar:ClickFixture";RegisterClassW(&fixture);
+    RECT area=online.items[0].info.rcMonitor;HANDLE prior=fs_enter_dpi();
+    HWND hidden=CreateWindowExW(WS_EX_TOOLWINDOW,fixture.lpszClassName,L"owned taskbar fixture",WS_POPUP,area.left+4,area.top+4,40,40,NULL,NULL,fixture.hInstance,NULL);fs_leave_dpi(prior);
+    ShowWindow(hidden,SW_SHOWNOACTIVATE);ShowWindow(hidden,SW_SHOWNOACTIVATE);
+    fs_begin();fs_add_screen(&online.items[0]);pump(40);
+    SendMessageW(fs_windows[0],WM_LBUTTONDOWN,0,0);pump(40);click_check_teardown();
+    CHECK(IsWindowVisible(hidden),"closing last screen restores genuinely protected taskbar fixture");DestroyWindow(hidden);
     CHECK(is_paused && !is_running && current_timer_mode==TIMER_SHORT_POMODORO && remaining_seconds==seconds && timer_stage_generation==generation && get_today_count_from_storage()==today,"ordinary screen close does not alter timer phase progress or statistics");
     for(i=0;i<2;++i) {
         FullscreenColorDraft color={0};FullscreenSignatureDraft signature={0};
