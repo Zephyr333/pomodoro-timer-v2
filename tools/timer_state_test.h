@@ -15,6 +15,8 @@ static VOID CALLBACK timer_test_input_tick(HWND hwnd, UINT message, UINT_PTR id,
 }
 
 static void timer_test_reset(void) {
+    snapshot_clear();
+    repeat_reminder_cancel();
     session_rules.valid = 0;
     stop_timer_clock();
     clear_overtime_state();

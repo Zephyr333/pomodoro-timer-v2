@@ -105,10 +105,11 @@ static BOOL WINAPI test_visual_foreground(HWND w) {
 #define ShowWindow test_visual_show_window
 #define SetForegroundWindow test_visual_foreground
 #define POMODORO_TEST_IO 1
-static int test_io_active, test_fail_stats_commit;
+static int test_io_active, test_fail_stats_commit, test_message_count;
 static wchar_t test_last_message[512];
 static wchar_t test_io_root[MAX_PATH], test_io_folder[MAX_PATH];
 static int WINAPI test_io_message(HWND owner, LPCWSTR text, LPCWSTR title, UINT flags) {
+    ++test_message_count;
     if (test_io_active) { wcsncpy(test_last_message,text,511);test_last_message[511]=0;return (flags & MB_TYPEMASK) == MB_YESNO ? IDYES : IDOK; }
     return MessageBoxW(owner,text,title,flags);
 }
@@ -138,7 +139,14 @@ static BOOL WINAPI test_track_popup_menu(HMENU menu, UINT flags, int x, int y, i
             CHECK(GetSubMenu(child, j) == NULL, "menu depth does not exceed two levels");
     }
     CHECK(!!(GetMenuState(session,ID_MENU_PAUSE_RESUME,MF_BYCOMMAND)&MF_CHECKED)==!!is_paused,"pause checkmark exactly reflects current state");
-    CHECK(GetMenuItemCount(session) == 2, "fullscreen moved out of session menu");
+    { HMENU duration=GetSubMenu(menu,8); int position=-1;
+      for(int k=0;k<GetMenuItemCount(duration);++k)if(GetMenuItemID(duration,k)==ID_MENU_REPEAT_INTERVAL)position=k;
+      CHECK(position>0 && GetMenuItemID(duration,position-1)==ID_MENU_SET_CUSTOM_DURATION && GetMenuItemID(duration,position+1)==ID_MENU_SET_TIME_BLOCK,"repeat interval is between custom duration and time step");
+      HMENU reminder=GetSubMenu(menu,9);
+      CHECK(!!(GetMenuState(reminder,ID_MENU_REPEAT_REMINDER,MF_BYCOMMAND)&MF_CHECKED)==!!settings.enable_repeat_reminder,"repeat switch checkmark follows preference");
+    }
+    CHECK(GetMenuItemCount(session) == 4 && GetMenuItemID(session,2)==0 && GetMenuItemID(session,3)==ID_MENU_RESTORE_SNAPSHOT, "snapshot follows pause and separator in session menu");
+    CHECK(!!(GetMenuState(session,ID_MENU_RESTORE_SNAPSHOT,MF_BYCOMMAND)&MF_GRAYED)==!snapshot_valid,"snapshot availability follows undo validity");
     { int commands[]={ID_MENU_IDLE_POMODORO,ID_MENU_IDLE_SHORT_POMODORO,ID_MENU_IDLE_SHORT_BREAK,ID_MENU_IDLE_LONG_BREAK,ID_MENU_IDLE_COUNT_UP,ID_MENU_IDLE_CUSTOM};
       int n;HMENU idle=GetSubMenu(menu,2);
       for(n=0;n<6;++n) CHECK(!(GetMenuState(idle,commands[n],MF_BYCOMMAND)&MF_GRAYED),"idle menu disables current selection and active-state choices");
@@ -183,7 +191,7 @@ static BOOL WINAPI test_track_popup_menu(HMENU menu, UINT flags, int x, int y, i
         for (i = 0; i < 3; ++i)
             CHECK(!!(GetMenuState(adjust, commands[i], MF_BYCOMMAND) & MF_GRAYED) == !timer_can_edit_time(), "time menu matches stage edit permission");
         CHECK(!!(GetMenuState(reminder, ID_MENU_SET_TOAST_COLLAPSE_SECONDS, MF_BYCOMMAND) & MF_GRAYED) == (settings.reminder_mode != 1), "collapse menu follows popup setting");
-        CHECK(GetMenuItemCount(reminder)==6 && GetMenuItemID(reminder,0)==ID_MENU_REMINDER_OFF && GetMenuItemID(reminder,1)==ID_MENU_REMINDER_POPUP && GetMenuItemID(reminder,2)==ID_MENU_REMINDER_STRONG && GetMenuItemID(reminder,3)==0 && GetMenuItemID(reminder,4)==ID_MENU_COMPLETION_SOUND && GetMenuItemID(reminder,5)==ID_MENU_SET_TOAST_COLLAPSE_SECONDS,"five reminder actions grouped in their own second-level menu");
+        CHECK(GetMenuItemCount(reminder)==7 && GetMenuItemID(reminder,0)==ID_MENU_REMINDER_OFF && GetMenuItemID(reminder,1)==ID_MENU_REMINDER_POPUP && GetMenuItemID(reminder,2)==ID_MENU_REMINDER_STRONG && GetMenuItemID(reminder,3)==0 && GetMenuItemID(reminder,4)==ID_MENU_REPEAT_REMINDER && GetMenuItemID(reminder,5)==ID_MENU_COMPLETION_SOUND && GetMenuItemID(reminder,6)==ID_MENU_SET_TOAST_COLLAPSE_SECONDS,"repeat switch precedes sound and collapse in reminder menu");
         for(i=0;i<3;++i) {
             UINT state=GetMenuState(reminder,ID_MENU_REMINDER_OFF+i,MF_BYCOMMAND);
             CHECK(!(state & MF_GRAYED) && !!(state & MF_CHECKED)==(settings.reminder_mode==i),"one reminder choice checked with all choices enabled");
@@ -759,6 +767,8 @@ static void test_reminder_menu(void) {
 
 #include "harden_test.h"
 #include "resume_test.h"
+#include "repeat_reminder_test.h"
+#include "snapshot_test.h"
 
 int wmain(int argc, wchar_t **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -771,6 +781,7 @@ int wmain(int argc, wchar_t **argv) {
     HANDLE old_dpi;
     HHOOK trace_hook;
     HDESK test_desktop = NULL;
+    int repeat_reminder_only=0, snapshot_only=0;
     int interactive = 0, stress = 0, ui_copy_only = 0, ready_only = 0, ux_only = 0, flexible_only = 0, micro_preview_only = 0, surface_only = 0, click_only = 0, wait_overtime_only = 0, strong_only = 0, reminder_menu_only = 0, consistency_only = 0, reliability_only = 0, tray_layout_only = 0, visual_only = 0, repair_only = 0, resume_only=0, harden_only=0, seal_only=0, guard_live=-1, focus_live=0;
     if (argc < 2 || wcsncmp(argv[1], L"tools\\.fullscreen-test\\", 23) != 0 || wcsstr(argv[1], L"..")) {
         /* Require the script's relative output path, not a personal data path. */
@@ -796,6 +807,8 @@ int wmain(int argc, wchar_t **argv) {
         if (!wcscmp(argv[i], L"--repair-only")) repair_only = 1;
         if(!wcscmp(argv[i],L"--seal-only"))seal_only=1;
         if(!wcscmp(argv[i],L"--harden-only"))harden_only=1;
+        if(!wcscmp(argv[i],L"--snapshot-only"))snapshot_only=1;
+        if(!wcscmp(argv[i],L"--repeat-reminder-only"))repeat_reminder_only=1;
         if(!wcscmp(argv[i],L"--resume-only"))resume_only=1;
         if(!wcscmp(argv[i],L"--guard-live")&&i+1<argc)guard_live=_wtoi(argv[++i]);
         if(!wcscmp(argv[i],L"--focus-live"))focus_live=1;
@@ -841,8 +854,8 @@ int wmain(int argc, wchar_t **argv) {
     trace_hook = SetWindowsHookExW(WH_CALLWNDPROC, trace_window_messages, NULL, GetCurrentThreadId());
     CHECK(trace_hook != NULL, "window lifecycle observer installed");
 
-    if (ui_copy_only || ready_only || ux_only || flexible_only || micro_preview_only || surface_only || click_only || wait_overtime_only || strong_only || reminder_menu_only || consistency_only || reliability_only || tray_layout_only || visual_only || repair_only || resume_only || harden_only || seal_only || guard_live>=0 || focus_live) {
-        if(resume_only)test_resume();else if(harden_only)test_harden();else if(guard_live>=0)test_guard_live(guard_live); else if(focus_live)test_focus_live(); else if(seal_only)test_seal_fixes(); else if(repair_only)test_gui_repairs(); else if(visual_only){visual_live_desktop=interactive;test_visual_stability();} else if(tray_layout_only){TimerSettings saved=settings;consistency_reset();reliability_icon_sheet();settings=saved;printf("TRAY_LAYOUT_TEST: %s (%d failures)\n",failures ? "FAIL" : "PASS",failures);} else if (reliability_only) test_reliability(); else if (consistency_only) test_session_consistency(); else if (reminder_menu_only) test_reminder_menu(); else if (strong_only) test_strong_reminder(); else if (wait_overtime_only) test_micro_wait_overtime(); else if (click_only) test_fullscreen_clicks(); else if (surface_only) test_surface_bugs(); else if (micro_preview_only) test_micro_preview(); else if (flexible_only) test_flexible_controls(); else if (ux_only) test_ux_consistency(); else if (ready_only) test_ready_states(); else test_ui_copy();
+    if (snapshot_only || repeat_reminder_only || ui_copy_only || ready_only || ux_only || flexible_only || micro_preview_only || surface_only || click_only || wait_overtime_only || strong_only || reminder_menu_only || consistency_only || reliability_only || tray_layout_only || visual_only || repair_only || resume_only || harden_only || seal_only || guard_live>=0 || focus_live) {
+        if(snapshot_only)test_snapshot();else if(repeat_reminder_only)test_repeat_reminder();else if(resume_only)test_resume();else if(harden_only)test_harden();else if(guard_live>=0)test_guard_live(guard_live); else if(focus_live)test_focus_live(); else if(seal_only)test_seal_fixes(); else if(repair_only)test_gui_repairs(); else if(visual_only){visual_live_desktop=interactive;test_visual_stability();} else if(tray_layout_only){TimerSettings saved=settings;consistency_reset();reliability_icon_sheet();settings=saved;printf("TRAY_LAYOUT_TEST: %s (%d failures)\n",failures ? "FAIL" : "PASS",failures);} else if (reliability_only) test_reliability(); else if (consistency_only) test_session_consistency(); else if (reminder_menu_only) test_reminder_menu(); else if (strong_only) test_strong_reminder(); else if (wait_overtime_only) test_micro_wait_overtime(); else if (click_only) test_fullscreen_clicks(); else if (surface_only) test_surface_bugs(); else if (micro_preview_only) test_micro_preview(); else if (flexible_only) test_flexible_controls(); else if (ux_only) test_ux_consistency(); else if (ready_only) test_ready_states(); else test_ui_copy();
         if (trace_hook) UnhookWindowsHookEx(trace_hook);
         DestroyWindow(g_main_hwnd);
         if (test_desktop) CloseDesktop(test_desktop);

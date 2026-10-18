@@ -105,7 +105,7 @@ static LRESULT CALLBACK StrongReminderWndProc(HWND window,UINT message,WPARAM wP
 #ifdef POMODORO_TEST_IO
             printf("SR close input message=%x\n",message);
 #endif
-            sr_dismiss(1);return 0;
+            { unsigned generation=sr.generation; sr_dismiss(1); repeat_reminder_user_closed(generation); } return 0;
         case WM_RBUTTONUP: {
             unsigned generation=sr.generation;
             timer_sync_clock(g_main_hwnd);
@@ -113,7 +113,7 @@ static LRESULT CALLBACK StrongReminderWndProc(HWND window,UINT message,WPARAM wP
             if(generation==timer_stage_generation) timer_primary_action(g_main_hwnd);
             return 0;
         }
-        case WM_KEYDOWN:if(wParam==VK_ESCAPE){sr_dismiss(1);return 0;}break;
+        case WM_KEYDOWN:if(wParam==VK_ESCAPE){unsigned generation=sr.generation;sr_dismiss(1);repeat_reminder_user_closed(generation);return 0;}break;
         case WM_DISPLAYCHANGE:case 0x02E0:PostMessageW(g_main_hwnd,WM_FS_LAYOUT,0,0);return 0;
     }
     return DefWindowProcW(window,message,wParam,lParam);

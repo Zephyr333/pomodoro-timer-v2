@@ -45,6 +45,7 @@ static int timer_correct_today_count(HWND hwnd, int count) {
     refresh_timer_icon_by_state(hwnd); return 1;
 }
 static void timer_apply_live_preferences(void) {
+    repeat_reminder_preferences_changed();
     if (!settings.enable_clock_sound) stop_clock_loop_sound();
     else if (is_running && !is_overtime) start_clock_loop_sound();
     sr_validate();
@@ -61,6 +62,7 @@ static void load_settings_preserving_runtime(void) {
 }
 
 static void timer_notify(HWND hwnd, TimerMode mode) {
+    repeat_reminder_event(mode);
     if (settings.enable_completion_sound) play_resource_sound("DING_WAV");
     notification_reminder_mode = settings.reminder_mode;
     if (settings.reminder_mode != 0)
@@ -87,9 +89,10 @@ static void timer_refresh_toast(void) {
 }
 
 static void timer_begin_micro_wait(HWND hwnd) {
+    snapshot_clear();
     micro.phase = MICRO_WAIT_START;
     micro.frozen_seconds = remaining_seconds;
-    ++timer_stage_generation; sr_validate();
+    ++timer_stage_generation; repeat_reminder_cancel(); sr_validate();
     close_toast_notification_if_open();
     stop_clock_loop_sound();
     if (timer_effective_overtime()) {
@@ -105,9 +108,10 @@ static void timer_begin_micro_wait(HWND hwnd) {
 }
 
 static void timer_finish_countdown(HWND hwnd) {
+    snapshot_clear();
     TimerMode source = current_timer_mode;
     int use_overtime = timer_effective_overtime();
-    ++timer_stage_generation; sr_validate();
+    ++timer_stage_generation; repeat_reminder_cancel(); sr_validate();
     close_toast_notification_if_open();
     stop_clock_loop_sound();
     if (source == TIMER_MICRO_BREAK) {
@@ -203,7 +207,7 @@ static void timer_start_micro(HWND hwnd) {
     clear_overtime_state();
     close_toast_notification_if_open();
     micro.phase = MICRO_ACTIVE;
-    ++timer_stage_generation; sr_validate();
+    ++timer_stage_generation; repeat_reminder_cancel(); sr_validate();
     current_timer_mode = TIMER_MICRO_BREAK;
     remaining_seconds = micro.duration_seconds;
     timer_remainder_ms=0;
@@ -221,7 +225,7 @@ static void timer_restore_focus(HWND hwnd) {
     remaining_seconds = micro.frozen_seconds;
     timer_remainder_ms=0;
     micro.phase = MICRO_NONE;
-    ++timer_stage_generation; sr_validate();
+    ++timer_stage_generation; repeat_reminder_cancel(); sr_validate();
     fs_completed_mode = TIMER_NONE;
     is_paused = 0;
     is_running = 1;
@@ -230,17 +234,19 @@ static void timer_restore_focus(HWND hwnd) {
 }
 
 static void timer_select_idle(void) {
+    snapshot_begin(g_main_hwnd);
     session_rules.valid = 0;
     stop_timer_clock(); clear_overtime_state(); clear_micro_state(); clear_count_up_state();
     close_toast_notification_if_open();
     current_timer_mode = TIMER_NONE; remaining_seconds = 0; is_paused = 0;
     completed_pending_mode = TIMER_NONE; fs_completed_mode = TIMER_NONE;
-    ++timer_stage_generation; sr_validate();
+    ++timer_stage_generation; repeat_reminder_cancel(); sr_validate();
+    snapshot_end();
 }
 static void timer_end_overtime(HWND hwnd) {
     TimerMode source = overtime_source_mode;
     stop_timer_clock(); clear_overtime_state(); close_toast_notification_if_open();
-    is_paused = 0; ++timer_stage_generation; sr_validate();
+    is_paused = 0; ++timer_stage_generation; repeat_reminder_cancel(); sr_validate();
     if (micro.phase == MICRO_WAIT_START) {
         current_timer_mode = micro.source;
         remaining_seconds = micro.frozen_seconds;
@@ -263,13 +269,13 @@ static void timer_stop_action(HWND hwnd) {
     if (micro.phase == MICRO_ACTIVE) {
         stop_timer_clock(); close_toast_notification_if_open();
         is_paused = 0; micro.phase = MICRO_WAIT_RESUME; remaining_seconds = 0;
-        ++timer_stage_generation; sr_validate();
+        ++timer_stage_generation; repeat_reminder_cancel(); sr_validate();
     } else {
         session_rules.valid = 0;
         stop_timer_clock(); set_idle_mode_after_manual_stop();
         is_paused = 0; current_timer_mode = TIMER_NONE; remaining_seconds = 0;
         clear_count_up_state(); clear_micro_state(); completed_pending_mode = TIMER_NONE;
-        close_toast_notification_if_open(); ++timer_stage_generation; sr_validate();
+        close_toast_notification_if_open(); ++timer_stage_generation; repeat_reminder_cancel(); sr_validate();
     }
     save_settings(); refresh_timer_icon_by_state(hwnd);
     if (fs_active) fs_refresh();
@@ -278,12 +284,12 @@ static void timer_stop_action(HWND hwnd) {
 static void timer_pause_toggle(HWND hwnd) {
     timer_sync_clock(hwnd);if(!timer_ui_can_pause())return;
     sr_dismiss(1);
-    if(is_paused){is_paused=0;is_running=1;launch_timer_clock(hwnd);}
+    if(is_paused){is_paused=0;is_running=1;if(launch_timer_clock(hwnd))snapshot_resume_succeeded();}
     else if(is_running){stop_timer_clock();is_paused=1;}
     refresh_timer_icon_by_state(hwnd);if(fs_active)fs_refresh();
 }
 
-static void timer_primary_action(HWND hwnd) {
+static void timer_primary_action_core(HWND hwnd) {
     timer_sync_clock(hwnd);
     if(is_paused){timer_pause_toggle(hwnd);return;}
     if (is_overtime) {
@@ -299,6 +305,14 @@ static void timer_primary_action(HWND hwnd) {
     if (micro.phase == MICRO_WAIT_START) timer_start_micro(hwnd);
     else if (micro.phase == MICRO_WAIT_RESUME) timer_restore_focus(hwnd);
     else start_current_idle_mode(hwnd);
+}
+
+static void timer_primary_action(HWND hwnd) {
+    timer_sync_clock(hwnd);
+    if (is_paused) { timer_pause_toggle(hwnd); return; }
+    snapshot_begin(hwnd);
+    timer_primary_action_core(hwnd);
+    snapshot_end();
 }
 
 #endif

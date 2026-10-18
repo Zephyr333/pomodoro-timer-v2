@@ -79,6 +79,10 @@
 #define ID_MENU_REMINDER_OFF 366
 #define ID_MENU_REMINDER_POPUP 367
 #define ID_MENU_REMINDER_STRONG 368
+#define ID_MENU_REPEAT_REMINDER 369
+#define ID_MENU_REPEAT_INTERVAL 370
+#define ID_MENU_RESTORE_SNAPSHOT 371
+#define ID_REPEAT_REMINDER_TIMER 4009
 #define ID_STRONG_REMINDER_TIMER 4006
 #define ID_TIMER_CLOCK 4005
 #define TOAST_WINDOW_CLASS L"PomodoroToastClass"
@@ -341,6 +345,8 @@ typedef struct {
     int enable_micro_break;
     int micro_break_interval_minutes;
     int micro_break_duration_minutes;
+    int enable_repeat_reminder;
+    int repeat_reminder_interval_minutes;
 } TimerSettings;
 
 typedef enum {
@@ -401,13 +407,15 @@ static unsigned strong_handled_generation;
 static unsigned notification_handled_generation;
 static TimerMode completed_pending_mode = TIMER_NONE;
 typedef enum { MICRO_NONE, MICRO_WAIT_START, MICRO_ACTIVE, MICRO_WAIT_RESUME } MicroPhase;
-static struct {
+typedef struct {
     MicroPhase phase;
     TimerMode source;
     int base_seconds, interval_seconds, duration_seconds;
     int frozen_seconds;
-} micro;
-static struct { int valid, overtime, count, long_count, initial_seconds; } session_rules;
+} MicroState;
+static MicroState micro;
+typedef struct { int valid, overtime, count, long_count, initial_seconds; } SessionRules;
+static SessionRules session_rules;
 int autostart_enabled = 0;
 static HICON last_icon = NULL;
 static wchar_t last_text[16] = {0};
@@ -543,6 +551,10 @@ static int timer_setting_locked(int command);
 static void timer_sync_clock(HWND hwnd);
 static void timer_advance_seconds(HWND hwnd, int elapsed);
 static void timer_primary_action(HWND hwnd);
+static void snapshot_begin(HWND hwnd);
+static void snapshot_end(void);
+static void snapshot_clear(void);
+static void snapshot_resume_succeeded(void);
 static void timer_stop_action(HWND hwnd);
 static void timer_refresh_toast(void);
 static int sr_active(void);
@@ -552,6 +564,10 @@ static int sr_monitor_covered(HMONITOR monitor);
 static void sr_mouse_hint(wchar_t *out, size_t capacity);
 static void sr_validate(void);
 static void sr_dismiss(int restore);
+static void repeat_reminder_cancel(void);
+static void repeat_reminder_event(TimerMode source);
+static void repeat_reminder_user_closed(unsigned generation);
+static void repeat_reminder_preferences_changed(void);
 static TimerMode timer_next_mode(TimerMode source);
 static void timer_select_idle(void);
 static int timer_effective_count(void);
@@ -1168,6 +1184,8 @@ static void reset_defaults_keep_data(void) {
     settings.enable_micro_break = 0;
     settings.micro_break_interval_minutes = 15;
     settings.micro_break_duration_minutes = 1;
+    settings.enable_repeat_reminder = 1;
+    settings.repeat_reminder_interval_minutes = 5;
     settings.enable_pomodoro_count = 1;
     memcpy(settings.fullscreen_colors, fs_default_colors, sizeof(fs_default_colors));
     memcpy(settings.fullscreen_scales, fs_default_scales, sizeof(fs_default_scales));
@@ -1678,7 +1696,7 @@ static void refresh_timer_icon_by_state(HWND hwnd) {
     timer_refresh_toast();
 }
 
-static void start_mode_from_menu(HWND hwnd, TimerMode mode) {
+static void start_mode_from_menu_core(HWND hwnd, TimerMode mode) {
     if (timer_session_active()) {
         stop_timer_clock();
         is_paused = 0;
@@ -1716,6 +1734,12 @@ static void start_mode_from_menu(HWND hwnd, TimerMode mode) {
     refresh_timer_icon_by_state(hwnd);
 }
 
+static void start_mode_from_menu(HWND hwnd, TimerMode mode) {
+    snapshot_begin(hwnd);
+    start_mode_from_menu_core(hwnd, mode);
+    snapshot_end();
+}
+
 static void start_current_idle_mode(HWND hwnd) {
     if (idle_mode == IDLE_BREAK) {
         if (idle_break_is_long) {
@@ -1733,6 +1757,8 @@ static void start_current_idle_mode(HWND hwnd) {
 }
 
 #include "timer_state.h"
+#include "repeat_reminder.h"
+#include "timer_snapshot.h"
 
 // Play sound from resource
 void play_resource_sound(const char* resourceName) {
@@ -1745,7 +1771,7 @@ void play_resource_sound(const char* resourceName) {
 // Start timer with specified duration
 void start_timer(HWND hwnd, int duration_minutes, TimerMode mode) {
     fs_completed_mode = TIMER_NONE;
-    ++timer_stage_generation;
+    ++timer_stage_generation; repeat_reminder_cancel();
     sr_validate();
     completed_pending_mode = TIMER_NONE;
     close_toast_notification_if_open();
@@ -1955,7 +1981,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     switch (uMsg) {
         case WM_INITDIALOG: {
             SetWindowTextW(hwndDlg, L"关于番茄钟");
-            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v3.0.10");
+            SetDlgItemTextW(hwndDlg, 210, L"番茄钟计时器 v3.0.12");
             SetDlgItemTextW(hwndDlg, 211, L"一个简洁的效率工具");
             SetDlgItemTextW(hwndDlg, 212, L"作者: Ferenc Lutischan");
             SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"访问项目主页");
@@ -2117,7 +2143,9 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 if (IsWindow(hwnd)) DestroyWindow(hwnd);
              } else if (LOWORD(wParam) == ID_TOAST_CLOSE && HIWORD(wParam) == BN_CLICKED) {
                  // Close button clicked
+                 unsigned generation = toast_stage_generation;
                  DestroyWindow(hwnd);
+                 repeat_reminder_user_closed(generation);
              } else if (LOWORD(wParam) == ID_TOAST_COLLAPSE && HIWORD(wParam) == BN_CLICKED) {
                  UINT dpi = toast_get_dpi(hwnd);
                  if (g_toast_collapsed) {
@@ -2160,6 +2188,12 @@ LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 KillTimer(hwnd, 1);
             }
             return 0;
+        case WM_CLOSE: {
+            unsigned generation = toast_stage_generation;
+            DestroyWindow(hwnd);
+            repeat_reminder_user_closed(generation);
+            return 0;
+        }
         case WM_DESTROY:
             KillTimer(hwnd, 1);
             if (g_hToastBtnFont) {
@@ -3024,6 +3058,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hControlMenu, MF_STRING, ID_MENU_START_CURRENT, timer_ui_primary_label());
                 AppendMenu(hControlMenu, MF_STRING | (is_paused ? MF_CHECKED : 0) | (timer_ui_can_pause() ? MF_ENABLED : MF_GRAYED), ID_MENU_PAUSE_RESUME, timer_ui_pause_label());
 
+                AppendMenu(hControlMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenu(hControlMenu, MF_STRING | (snapshot_valid ? MF_ENABLED : MF_GRAYED), ID_MENU_RESTORE_SNAPSHOT, L"恢复快照");
+
                 AppendMenu(hStartMenu, MF_STRING, 1, L"开始长番茄钟");
                 AppendMenu(hStartMenu, MF_STRING, ID_MENU_START_SHORT_POMODORO, L"开始短番茄钟");
                 AppendMenu(hStartMenu, MF_STRING, 2, L"开始短休息");
@@ -3049,12 +3086,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 AppendMenu(hDurationMenu, MF_STRING | (timer_setting_locked(ID_MENU_MICRO_INTERVAL) ? MF_GRAYED : 0), ID_MENU_MICRO_INTERVAL, L"微休息间隔(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING | (timer_setting_locked(ID_MENU_MICRO_DURATION) ? MF_GRAYED : 0), ID_MENU_MICRO_DURATION, L"微休息时长(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_CUSTOM_DURATION, L"自定义时长(分钟)");
+                AppendMenu(hDurationMenu, MF_STRING, ID_MENU_REPEAT_INTERVAL, L"重复提醒间隔(分钟)");
                 AppendMenu(hDurationMenu, MF_STRING, ID_MENU_SET_TIME_BLOCK, L"步进时间(分钟)");
 
                 AppendMenu(hReminderMenu, MF_STRING | (settings.reminder_mode == 0 ? MF_CHECKED : 0), ID_MENU_REMINDER_OFF, L"到点提醒：关闭");
                 AppendMenu(hReminderMenu, MF_STRING | (settings.reminder_mode == 1 ? MF_CHECKED : 0), ID_MENU_REMINDER_POPUP, L"到点提醒：弹窗");
                 AppendMenu(hReminderMenu, MF_STRING | (settings.reminder_mode == 2 ? MF_CHECKED : 0), ID_MENU_REMINDER_STRONG, L"到点提醒：强提醒");
                 AppendMenu(hReminderMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenu(hReminderMenu, MF_STRING | (settings.enable_repeat_reminder ? MF_CHECKED : 0), ID_MENU_REPEAT_REMINDER, L"重复提醒");
                 AppendMenu(hReminderMenu, MF_STRING | (settings.enable_completion_sound ? MF_CHECKED : 0), ID_MENU_COMPLETION_SOUND, L"完成声音");
                 AppendMenu(hReminderMenu, MF_STRING | (settings.enable_toast_auto_collapse ? MF_CHECKED : 0) | (settings.reminder_mode == 1 ? 0 : MF_GRAYED), ID_MENU_SET_TOAST_COLLAPSE_SECONDS, L"弹窗自动折叠");
 
@@ -3163,6 +3202,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     case ID_MENU_START_CURRENT:
                         if (timer_ui_can_start()) timer_primary_action(hwnd);
                         break;
+                    case ID_MENU_RESTORE_SNAPSHOT:
+                        snapshot_restore(hwnd);
+                        break;
                     case ID_MENU_PAUSE_RESUME:
                         timer_pause_toggle(hwnd);
                         break;
@@ -3216,6 +3258,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         if (!save_settings()) { settings.reminder_mode = previous; break; }
                         sr_dismiss(1);
                         timer_apply_live_preferences();
+                        break;
+                    }
+                    case ID_MENU_REPEAT_REMINDER: {
+                        int previous = settings.enable_repeat_reminder;
+                        settings.enable_repeat_reminder = !previous;
+                        if (!save_settings()) settings.enable_repeat_reminder = previous;
+                        else repeat_reminder_preferences_changed();
+                        break;
+                    }
+                    case ID_MENU_REPEAT_INTERVAL: {
+                        int previous = settings.repeat_reminder_interval_minutes, value = previous;
+                        if (PromptForInteger(hwnd, L"重复提醒间隔", L"请输入分钟数:", value, 1, 720, &value) && value != settings.repeat_reminder_interval_minutes) {
+                            previous = settings.repeat_reminder_interval_minutes;
+                            settings.repeat_reminder_interval_minutes = value;
+                            if (!save_settings()) settings.repeat_reminder_interval_minutes = previous;
+                            else repeat_reminder_preferences_changed();
+                        }
                         break;
                     }
                     case ID_MENU_ENABLE_MICRO_BREAK:
@@ -3408,7 +3467,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         timer_select_idle();
                         completed_pending_mode = TIMER_NONE;
                         close_toast_notification_if_open();
-                        ++timer_stage_generation;
+                        ++timer_stage_generation; repeat_reminder_cancel();
                         sr_validate();
                         if (is_running || is_paused) {
                             stop_timer_clock();
@@ -3427,7 +3486,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         timer_select_idle();
                         completed_pending_mode = TIMER_NONE;
                         close_toast_notification_if_open();
-                        ++timer_stage_generation;
+                        ++timer_stage_generation; repeat_reminder_cancel();
                         sr_validate();
                         if (is_running || is_paused) {
                             stop_timer_clock();
@@ -3446,7 +3505,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         timer_select_idle();
                         completed_pending_mode = TIMER_NONE;
                         close_toast_notification_if_open();
-                        ++timer_stage_generation;
+                        ++timer_stage_generation; repeat_reminder_cancel();
                         sr_validate();
                         if (is_running || is_paused) {
                             stop_timer_clock();
@@ -3465,7 +3524,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         timer_select_idle();
                         completed_pending_mode = TIMER_NONE;
                         close_toast_notification_if_open();
-                        ++timer_stage_generation;
+                        ++timer_stage_generation; repeat_reminder_cancel();
                         sr_validate();
                         if (is_running || is_paused) {
                             stop_timer_clock();
@@ -3484,7 +3543,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         timer_select_idle();
                         completed_pending_mode = TIMER_NONE;
                         close_toast_notification_if_open();
-                        ++timer_stage_generation;
+                        ++timer_stage_generation; repeat_reminder_cancel();
                         sr_validate();
                         if (is_running || is_paused) {
                             stop_timer_clock();
@@ -3502,7 +3561,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         timer_select_idle();
                         completed_pending_mode = TIMER_NONE;
                         close_toast_notification_if_open();
-                        ++timer_stage_generation;
+                        ++timer_stage_generation; repeat_reminder_cancel();
                         sr_validate();
                         if (is_running || is_paused) {
                             stop_timer_clock();
@@ -3570,6 +3629,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case WM_TIMER:
             if (wParam == ID_LAYER_GUARD_TIMER) { fs_maintain_layer(0);return 0; }
+            if (wParam == ID_REPEAT_REMINDER_TIMER) { repeat_reminder_tick(GetTickCount64()); return 0; }
             if (wParam == ID_STRONG_REMINDER_TIMER) { sr_tick(); return 0; }
             if (wParam == ID_TIMER_CLOCK) { timer_sync_clock(hwnd); return 0; }
             if (wParam == ID_FS_REFRESH) { fs_refresh(); return 0; }
@@ -3583,6 +3643,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         case WM_DESTROY:
             // Clean up before exit
+            snapshot_clear();
+            repeat_reminder_cancel();
             td_stop();
             sr_dismiss(0);
             fs_shutdown();
@@ -3664,6 +3726,8 @@ void load_settings() {
     settings.enable_micro_break = 0;
     settings.micro_break_interval_minutes = 15;
     settings.micro_break_duration_minutes = 1;
+    settings.enable_repeat_reminder = 1;
+    settings.repeat_reminder_interval_minutes = 5;
     memcpy(settings.fullscreen_colors, fs_default_colors, sizeof(fs_default_colors));
     memcpy(settings.fullscreen_scales, fs_default_scales, sizeof(fs_default_scales));
     {
@@ -3699,6 +3763,8 @@ void load_settings() {
             settings.default_pomodoro_is_long = extract_json_int(buf, "\"default_pomodoro_is_long\"", settings.default_pomodoro_is_long);
             settings.default_break_is_long = extract_json_int(buf, "\"default_break_is_long\"", settings.default_break_is_long);
             settings.enable_pomodoro_count = extract_json_int(buf, "\"enable_pomodoro_count\"", settings.enable_pomodoro_count);
+            settings.enable_repeat_reminder = extract_json_int(buf, "\"enable_repeat_reminder\"", 1);
+            settings.repeat_reminder_interval_minutes = extract_json_int(buf, "\"repeat_reminder_interval_minutes\"", 5);
             settings.enable_micro_break = extract_json_int(buf, "\"enable_micro_break\"", 0);
             settings.micro_break_interval_minutes = extract_json_int(buf, "\"micro_break_interval_minutes\"", 15);
             settings.micro_break_duration_minutes = extract_json_int(buf, "\"micro_break_duration_minutes\"", 1);
@@ -3746,6 +3812,8 @@ void load_settings() {
     settings.default_break_is_long = settings.default_break_is_long ? 1 : 0;
     settings.enable_pomodoro_count = settings.enable_pomodoro_count ? 1 : 0;
     settings.enable_overtime_count_up = settings.enable_overtime_count_up ? 1 : 0;
+    settings.enable_repeat_reminder = !!settings.enable_repeat_reminder;
+    settings.repeat_reminder_interval_minutes = clamp_int(settings.repeat_reminder_interval_minutes, 1, 720);
     settings.enable_micro_break = settings.enable_micro_break ? 1 : 0;
     settings.micro_break_interval_minutes = clamp_int(settings.micro_break_interval_minutes, 1, 720);
     settings.micro_break_duration_minutes = clamp_int(settings.micro_break_duration_minutes, 1, 60);
@@ -3791,6 +3859,7 @@ int save_settings(void) {
                           settings_json_write_string(fp, settings.fullscreen_fonts[i]);
             }
         }
+        if (writeOk) writeOk = fprintf(fp, ",\"enable_repeat_reminder\":%d,\"repeat_reminder_interval_minutes\":%d", settings.enable_repeat_reminder, settings.repeat_reminder_interval_minutes) >= 0;
         if (writeOk) writeOk = fprintf(fp, ",\"fullscreen_signature\":") >= 0 &&
                                settings_json_write_string(fp, settings.fullscreen_signature) &&
                                fputc('}', fp) != EOF;

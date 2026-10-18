@@ -14,8 +14,8 @@ static void strong_test_render(int white) {
     SelectObject(dc,previous);DeleteObject(bitmap);DeleteDC(dc);ReleaseDC(NULL,desktop);
 }
 static void test_strong_reminder(void) {
-    TimerSettings saved=settings;FullscreenMonitors online;int i;
-    strong_test_reset();test_silent_sound=1;test_one_shot_sound_count=0;
+    TimerSettings saved=settings;FullscreenMonitors online;int i;int message_count=test_message_count;
+    strong_test_reset();test_io_active=1;test_silent_sound=1;test_one_shot_sound_count=0;
     CHECK(fs_get_monitors(&online) && online.count>0,"native monitor inventory exists");
     const char *json[]={"{\"show_completion_dialog\":0}","{\"show_completion_dialog\":1}","{\"reminder_mode\":2,\"show_completion_dialog\":0}","{\"reminder_mode\":1}","{\"reminder_mode\":0}","{\"reminder_mode\":99}"};
     int modes[]={0,1,2,1,0,1};
@@ -87,6 +87,8 @@ static void test_strong_reminder(void) {
     start_timer(g_main_hwnd,0,TIMER_CUSTOM);timer_advance_seconds(g_main_hwnd,0);pump(30);
     CHECK(sr.active,"temporary overlay covers owned foreground without modifying it");SendMessageW(sr.items[0].window,WM_LBUTTONUP,0,0);
     CHECK(GetFocus()==edit && IsWindow(owner),"closing temporary reminder restores original input focus");DestroyWindow(owner);
-    strong_test_reset();settings=saved;save_settings();test_silent_sound=0;
+    strong_test_reset();settings=saved;save_settings();
+    CHECK(test_message_count==message_count,"strong regression has no unexpected modal errors");
+    test_silent_sound=0;test_io_active=0;
     printf("STRONG_REMINDER_TEST: %s (%d failures)\n",failures ? "FAIL" : "PASS",failures);
 }
