@@ -19,7 +19,7 @@ static void test_snapshot(void) {
         snapshot_test_restore();
         CHECK(is_running&&!is_paused && !!is_overtime==overtime && remaining_seconds==87 && overtime_seconds==(overtime?37:0),"restore resumes original ordinary or overtime clock");
         CHECK(current_timer_mode==(overtime?TIMER_NONE:modes[m]) && timer_remainder_ms==375 && session_rules.initial_seconds==(modes[m]==TIMER_COUNT_UP?0:180),"restore preserves mode fraction and session cap");
-        CHECK(!snapshot_valid && !repeat_reminder.valid && !sr_active() && !g_hToastWnd,"restore consumes undo and clears current reminders");
+        CHECK(!snapshot_valid && !repeat_reminder.valid && !sr_active() && !g_hToastWnd,"restore without a saved completion event consumes undo and leaves reminders clear");
         CHECK(get_today_count_from_storage()==count && timer_stage_generation>generation,"restore does not credit and uses fresh generation");
         consistency_clock();
     }

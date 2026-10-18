@@ -9,6 +9,12 @@ static struct {
     ULONGLONG due;
 } repeat_reminder;
 
+typedef struct {
+    int valid, armed, interval_minutes;
+    TimerMode source;
+    ULONGLONG remaining_ms;
+} RepeatReminderSnapshot;
+
 static void repeat_reminder_cancel(void) {
     KillTimer(g_main_hwnd, ID_REPEAT_REMINDER_TIMER);
     memset(&repeat_reminder, 0, sizeof(repeat_reminder));
@@ -25,13 +31,43 @@ static void repeat_reminder_event(TimerMode source) {
     repeat_reminder.source = source;
 }
 
-static void repeat_reminder_arm(void) {
-    if (!repeat_reminder_valid() || !settings.enable_repeat_reminder) return;
-    repeat_reminder.due = GetTickCount64() + (ULONGLONG)settings.repeat_reminder_interval_minutes * 60000;
+static int repeat_reminder_schedule(ULONGLONG now, ULONGLONG delay) {
+    repeat_reminder.due = now + delay;
     repeat_reminder.interval_minutes = settings.repeat_reminder_interval_minutes;
     repeat_reminder.armed = SetTimer(g_main_hwnd, ID_REPEAT_REMINDER_TIMER, 1000, NULL) != 0;
     if (!repeat_reminder.armed)
         MessageBoxW(g_main_hwnd, L"无法安排重复提醒。", L"提醒失败", MB_OK | MB_ICONERROR);
+    return repeat_reminder.armed;
+}
+
+static void repeat_reminder_arm(void) {
+    if (!repeat_reminder_valid() || !settings.enable_repeat_reminder) return;
+    repeat_reminder_schedule(GetTickCount64(), (ULONGLONG)settings.repeat_reminder_interval_minutes * 60000);
+}
+
+static RepeatReminderSnapshot repeat_reminder_capture(ULONGLONG now) {
+    RepeatReminderSnapshot saved = {0};
+    if (repeat_reminder_valid() && settings.enable_repeat_reminder) {
+        saved.valid = 1;
+        saved.source = repeat_reminder.source;
+        saved.armed = repeat_reminder.armed;
+        saved.interval_minutes = repeat_reminder.interval_minutes;
+        if (saved.armed && repeat_reminder.due > now) saved.remaining_ms = repeat_reminder.due - now;
+    }
+    return saved;
+}
+
+/* Rebind the event to the restored stage; never replay a completion or a window. */
+static int repeat_reminder_restore(const RepeatReminderSnapshot *saved, ULONGLONG now) {
+    repeat_reminder_cancel();
+    if (!saved->valid || !settings.enable_repeat_reminder) return 1;
+    repeat_reminder.valid = 1;
+    repeat_reminder.generation = timer_stage_generation;
+    repeat_reminder.source = saved->source;
+    ULONGLONG delay = (ULONGLONG)settings.repeat_reminder_interval_minutes * 60000;
+    if (saved->armed && saved->interval_minutes == settings.repeat_reminder_interval_minutes)
+        delay = saved->remaining_ms;
+    return repeat_reminder_schedule(now, delay);
 }
 
 static void repeat_reminder_user_closed(unsigned generation) {

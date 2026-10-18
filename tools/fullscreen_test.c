@@ -24,10 +24,11 @@ static BOOL WINAPI test_shell_notify(DWORD message,PNOTIFYICONDATAW data) {
 }
 #define Shell_NotifyIconW test_shell_notify
 static HWND test_timer_owner;
-static int test_timer_tracking,test_resume_fail;
+static int test_timer_tracking,test_resume_fail,test_repeat_timer_fail;
 static unsigned test_main_timers;
 static UINT_PTR WINAPI test_set_timer(HWND owner,UINT_PTR id,UINT interval,TIMERPROC proc) {
     if(test_resume_fail&&id==4005)return 0;
+    if(test_repeat_timer_fail&&id==4009)return 0;
     UINT_PTR result=SetTimer(owner,id,interval,proc);
     if(result && test_timer_tracking && owner==test_timer_owner && id>=4001 && id<=4010)test_main_timers|=1u<<(id-4001);
     return result;

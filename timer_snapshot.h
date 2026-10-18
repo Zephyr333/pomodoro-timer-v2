@@ -9,8 +9,10 @@ typedef struct {
     int idle_focus_long, idle_break_long;
     MicroState micro;
     SessionRules rules;
+    RepeatReminderSnapshot reminder;
 } TimerSnapshot;
 static TimerSnapshot timer_snapshot, snapshot_candidate;
+enum { SNAPSHOT_RETRY_CLOCK = 1, SNAPSHOT_RETRY_REMINDER = 2 };
 static int snapshot_valid, snapshot_depth, snapshot_candidate_valid, snapshot_retry;
 
 static void snapshot_clear(void) {
@@ -38,6 +40,7 @@ static void snapshot_begin(HWND hwnd) {
     snapshot_candidate.idle_break_long = idle_break_is_long;
     snapshot_candidate.micro = micro;
     snapshot_candidate.rules = session_rules;
+    snapshot_candidate.reminder = repeat_reminder_capture(GetTickCount64());
     snapshot_candidate_valid = 1;
 }
 
@@ -52,7 +55,12 @@ static void snapshot_end(void) {
 }
 
 static void snapshot_resume_succeeded(void) {
-    if (snapshot_retry) snapshot_clear();
+    if (!(snapshot_retry & SNAPSHOT_RETRY_CLOCK)) return;
+    snapshot_retry &= ~SNAPSHOT_RETRY_CLOCK;
+    if (snapshot_retry & SNAPSHOT_RETRY_REMINDER) {
+        if (repeat_reminder_restore(&timer_snapshot.reminder, GetTickCount64())) snapshot_retry &= ~SNAPSHOT_RETRY_REMINDER;
+    }
+    if (!snapshot_retry) snapshot_clear();
 }
 
 static void snapshot_restore(HWND hwnd) {
@@ -82,8 +90,10 @@ static void snapshot_restore(HWND hwnd) {
     idle_break_is_long = saved.idle_break_long;
     micro = saved.micro;
     session_rules = saved.rules;
-    if (saved.running && !launch_timer_clock(hwnd)) snapshot_retry = 1;
-    else snapshot_clear();
+    /* Separate failures: resuming the clock must not discard a failed reminder retry. */
+    snapshot_retry = saved.running && !launch_timer_clock(hwnd) ? SNAPSHOT_RETRY_CLOCK : 0;
+    if (!repeat_reminder_restore(&saved.reminder, GetTickCount64())) snapshot_retry |= SNAPSHOT_RETRY_REMINDER;
+    if (!snapshot_retry) snapshot_clear();
     refresh_timer_icon_by_state(hwnd);
     if (fs_active) fs_refresh();
 }
